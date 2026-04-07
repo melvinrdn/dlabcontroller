@@ -823,7 +823,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         pid = iy * (ix.max() + 1) + ix
         uniq, inv = np.unique(pid, return_inverse=True)
 
-        rng = np.random.default_rng(12345)
+        rng = np.random.default_rng(1234)
         sideA = rng.random(uniq.size)[inv] < xiA
         u_int = rng.random(uniq.size)[inv]
 

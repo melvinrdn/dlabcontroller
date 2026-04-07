@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+# TODO : fix alpha into alpha
 import datetime, time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -19,7 +19,7 @@ from dlab.core.device_registry import REGISTRY
 
 import matplotlib
 matplotlib.use('Qt5Agg')
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
 import logging
@@ -153,11 +153,11 @@ def intensity_to_power(I_peak_W_cm2: float, waist_um: float,
 
 def load_slm_calibration(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Load SLM calibration file: ArelA vs normalized intensity fraction (0 to 1)
-    Note: The file format has intensity decreasing as ArelA increases
+    Load SLM calibration file: alpha_dump_a vs normalized intensity fraction (0 to 1)
+    Note: The file format has intensity decreasing as alpha increases
     
     Returns:
-        (ArelA_values, intensity_fraction_values) - sorted for interpolation
+        (alpha_dump_a_values, intensity_fraction_values)
     """
     data = []
     with open(file_path, 'r') as f:
@@ -168,33 +168,29 @@ def load_slm_calibration(file_path: str) -> Tuple[np.ndarray, np.ndarray]:
             parts = line.split()
             if len(parts) >= 2:
                 try:
-                    arela_val = float(parts[0])
+                    alpha_dump_a_val = float(parts[0])
                     intensity_frac = float(parts[1])
-                    data.append((arela_val, intensity_frac))
+                    data.append((alpha_dump_a_val, intensity_frac))
                 except ValueError:
                     continue
     
     if not data:
         raise ValueError("No valid data found in calibration file")
     
-    # Sort by intensity (ascending) for proper interpolation
-    data.sort(key=lambda x: x[1])
-    arela_vals = np.array([d[0] for d in data])
+    alpha_dump_a_vals = np.array([d[0] for d in data])
     intensity_fracs = np.array([d[1] for d in data])
     
-    # Validate
     if np.any(intensity_fracs < 0) or np.any(intensity_fracs > 1):
         raise ValueError("Intensity fraction values must be between 0 and 1")
     
-    if np.any(arela_vals < 0) or np.any(arela_vals > 1):
-        raise ValueError("ArelA values must be between 0 and 1")
+    if np.any(alpha_dump_a_vals < 0) or np.any(alpha_dump_a_vals > 1):
+        raise ValueError("alpha_dump_a values must be between 0 and 1")
     
-    return arela_vals, intensity_fracs
+    return alpha_dump_a_vals, intensity_fracs
 
 
 class MonitorWindow(QWidget):
     """Real-time monitoring window for phase error and std during scan"""
-    
     def __init__(self, ratio_values, setpoints, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Scan Monitor - Phase Error & Std")
@@ -304,7 +300,7 @@ class TwoColorScanWorker(QObject):
         slm_class_name: str = None,
         slm_field_name: str = None,
         slm_screen: int = 3,
-        slm_calib_arela: np.ndarray = None,
+        slm_calib_alpha: np.ndarray = None,
         slm_calib_intensity: np.ndarray = None,
         # Laser parameters for 2omega
         omega2_max_power_W: float = None,
@@ -351,7 +347,7 @@ class TwoColorScanWorker(QObject):
         self.slm_class_name = slm_class_name
         self.slm_field_name = slm_field_name
         self.slm_screen = slm_screen
-        self.slm_calib_arela = slm_calib_arela
+        self.slm_calib_alpha = slm_calib_alpha
         self.slm_calib_intensity = slm_calib_intensity
         
         self.omega2_max_power_W = omega2_max_power_W
@@ -401,18 +397,18 @@ class TwoColorScanWorker(QObject):
 
     def _set_slm_intensity(self, I_peak_W_cm2: float, I_max_W_cm2: float) -> float:
         """
-        Set SLM ArelA to achieve desired peak intensity
+        Set SLM alpha to achieve desired peak intensity
         
         Returns:
-            Actual ArelA value set
+            Actual alpha value set
         """
         # Calculate required intensity fraction
         fraction = I_peak_W_cm2 / I_max_W_cm2
         fraction = np.clip(fraction, 0.0, 1.0)
         
-        # Interpolate to find ArelA: given intensity fraction, find ArelA
-        # Since intensity typically decreases with increasing ArelA, we interpolate
-        arela_val = np.interp(fraction, self.slm_calib_intensity, self.slm_calib_arela)
+        # Interpolate to find alpha: given intensity fraction, find alpha
+        # Since intensity typically decreases with increasing alpha, we interpolate
+        alpha_val = np.interp(fraction, self.slm_calib_intensity, self.slm_calib_alpha)
         
         # Set SLM
         active_classes = REGISTRY.get("slm:red:active_classes") or []
@@ -438,7 +434,7 @@ class TwoColorScanWorker(QObject):
             )
         
         widget = getattr(phase_widget, self.slm_field_name)
-        widget.setText(str(arela_val))
+        widget.setText(str(alpha_val))
         
         # Compose and publish
         slm_window = REGISTRY.get("slm:red:window")
@@ -453,9 +449,9 @@ class TwoColorScanWorker(QObject):
         
         slm_red.publish(levels, screen_num=self.slm_screen)
         
-        self._emit(f"  SLM {self.slm_class_name}:{self.slm_field_name} = {arela_val:.6f} (intensity fraction: {fraction:.4f})")
+        self._emit(f"  SLM {self.slm_class_name}:{self.slm_field_name} = {alpha_val:.6f} (intensity fraction: {fraction:.4f})")
         
-        return float(arela_val)
+        return float(alpha_val)
 
     def _wait_for_stability(self, phase_ctrl, setpoint: float) -> Tuple[float, float, float, bool]:
         """
@@ -530,7 +526,7 @@ class TwoColorScanWorker(QObject):
                     self._emit("SLM class/field not specified.")
                     self.finished.emit("")
                     return
-                if self.slm_calib_arela is None or self.slm_calib_intensity is None:
+                if self.slm_calib_alpha is None or self.slm_calib_intensity is None:
                     self._emit("SLM calibration not loaded.")
                     self.finished.emit("")
                     return
@@ -595,7 +591,7 @@ class TwoColorScanWorker(QObject):
             with open(scan_log, "w", encoding="utf-8") as f:
                 if self.enable_ratio_scan:
                     if self.omega_control_mode == "slm":
-                        header = ["Ratio_R", "ArelA", "Power_2omega_W",
+                        header = ["Ratio_R", "alpha", "Power_2omega_W",
                                  "I_omega_peak_W_cm2", "I_2omega_peak_W_cm2",
                                  "Setpoint_rad", "MeasuredPhase_rad", "PhaseStd_rad", "PhaseError_rad",
                                  "DetectorKey", "DataFile", "Exposure_or_IntTime", "Averages"]
@@ -685,7 +681,7 @@ class TwoColorScanWorker(QObject):
                 
                 # Set powers/intensities for this ratio
                 power_omega = None
-                arela_val = None
+                alpha_val = None
                 power_2omega = None
                 I_omega_peak = None
                 I_2omega_peak = None
@@ -730,7 +726,7 @@ class TwoColorScanWorker(QObject):
                     try:
                         if self.omega_control_mode == "slm":
                             # Set SLM
-                            arela_val = self._set_slm_intensity(I_omega_peak, I_max_omega)
+                            alpha_val = self._set_slm_intensity(I_omega_peak, I_max_omega)
                         else:
                             # Set waveplate
                             power_omega = intensity_to_power(
@@ -787,7 +783,7 @@ class TwoColorScanWorker(QObject):
                         if self.enable_ratio_scan:
                             self.monitor_update.emit(ratio_idx, phase_idx, phase_error, std_phase)
                     else:
-                        scan_type = "background with reference (ArelA=1)" if self.background_w_ref else "background"
+                        scan_type = "background with reference (alpha=1)" if self.background_w_ref else "background"
                         if self.enable_ratio_scan:
                             self._emit(f"Capturing {scan_type} @ R={ratio_R:.3f}")
                         else:
@@ -847,7 +843,7 @@ class TwoColorScanWorker(QObject):
                                         "I_2omega_peak_W_cm2": I_2omega_peak,
                                     })
                                     if self.omega_control_mode == "slm":
-                                        meta_dict["ArelA"] = arela_val
+                                        meta_dict["alpha"] = alpha_val
                                     else:
                                         meta_dict["Power_omega_W"] = power_omega
                                     meta_dict["Power_2omega_W"] = power_2omega
@@ -919,7 +915,7 @@ class TwoColorScanWorker(QObject):
                                         "I_2omega_peak_W_cm2": I_2omega_peak,
                                     })
                                     if self.omega_control_mode == "slm":
-                                        file_header["ArelA"] = arela_val
+                                        file_header["alpha"] = alpha_val
                                     else:
                                         file_header["Power_omega_W"] = power_omega
                                     file_header["Power_2omega_W"] = power_2omega
@@ -966,7 +962,7 @@ class TwoColorScanWorker(QObject):
                                 if self.omega_control_mode == "slm":
                                     row = [
                                         f"{float(ratio_R):.9f}",
-                                        f"{float(arela_val):.9f}",
+                                        f"{float(alpha_val):.9f}",
                                         f"{float(power_2omega):.9f}",
                                         f"{float(I_omega_peak):.9e}",
                                         f"{float(I_2omega_peak):.9e}",
@@ -1051,7 +1047,7 @@ class TwoColorScanTab(QWidget):
         self._doing_background = False
         self._cached_params = None
         self._last_scan_log_path = None
-        self._slm_calib_arela = None
+        self._slm_calib_alpha = None
         self._slm_calib_intensity = None
         self._build_ui()
         self._refresh_devices()
@@ -1112,7 +1108,7 @@ class TwoColorScanTab(QWidget):
         
         slm_row1 = QHBoxLayout()
         self.slm_class_le = QLineEdit("TwoFociStochastic")
-        self.slm_field_le = QLineEdit("le_ArelA")
+        self.slm_field_le = QLineEdit("le_alpha_dump_A")
         self.slm_screen_le = QLineEdit("3")
         slm_row1.addWidget(QLabel("Class:"))
         slm_row1.addWidget(self.slm_class_le)
@@ -1142,7 +1138,7 @@ class TwoColorScanTab(QWidget):
         
         # Background with reference option
         slm_row4 = QHBoxLayout()
-        self.slm_background_ref_cb = QCheckBox("Take reference with beam dumped (ArelA=1) before background")
+        self.slm_background_ref_cb = QCheckBox("Take reference with beam dumped (alpha=1) before background")
         slm_row4.addWidget(self.slm_background_ref_cb)
         slm_row4.addStretch()
         slm_l.addLayout(slm_row4)
@@ -1417,12 +1413,12 @@ class TwoColorScanTab(QWidget):
             return
         
         try:
-            self._slm_calib_arela, self._slm_calib_intensity = load_slm_calibration(path)
-            n_points = len(self._slm_calib_arela)
-            arela_range = f"[{self._slm_calib_arela.min():.3f}, {self._slm_calib_arela.max():.3f}]"
+            self._slm_calib_alpha, self._slm_calib_intensity = load_slm_calibration(path)
+            n_points = len(self._slm_calib_alpha)
+            alpha_range = f"[{self._slm_calib_alpha.min():.3f}, {self._slm_calib_alpha.max():.3f}]"
             intensity_range = f"[{self._slm_calib_intensity.min():.3f}, {self._slm_calib_intensity.max():.3f}]"
             self.slm_calib_status.setText(
-                f"Status: Loaded {n_points} points, ArelA {arela_range}, intensity {intensity_range}"
+                f"Status: Loaded {n_points} points, alpha {alpha_range}, intensity {intensity_range}"
             )
             self.slm_calib_status.setStyleSheet("QLabel { color: green; }")
             self._update_max_intensity()
@@ -1778,7 +1774,7 @@ class TwoColorScanTab(QWidget):
                     if not slm_class_name or not slm_field_name:
                         raise ValueError("SLM class and field names required.")
                     
-                    if self._slm_calib_arela is None or self._slm_calib_intensity is None:
+                    if self._slm_calib_alpha is None or self._slm_calib_intensity is None:
                         raise ValueError("Load SLM calibration file first.")
             
             # 2-omega waveplate (always needed)
@@ -2020,7 +2016,7 @@ class TwoColorScanTab(QWidget):
             slm_class_name=p["slm_class_name"],
             slm_field_name=p["slm_field_name"],
             slm_screen=p["slm_screen"],
-            slm_calib_arela=self._slm_calib_arela,
+            slm_calib_alpha=self._slm_calib_alpha,
             slm_calib_intensity=self._slm_calib_intensity,
             omega2_max_power_W=p["omega2_max_power_W"],
             omega2_waist_um=p["omega2_waist_um"],
@@ -2055,18 +2051,18 @@ class TwoColorScanTab(QWidget):
         self._thread.start()
 
     def _launch_background_w_ref(self, existing):
-        """Launch background scan with ArelA=1 (beam dumped) - single acquisition, no ratios"""
+        """Launch background scan with alpha=1 (beam dumped) - single acquisition, no ratios"""
         p = self._cached_params
         if not p:
             return
         
-        # Set ArelA to 1.0 (beam fully dumped)
+        # Set alpha to 1.0 (beam fully dumped)
         try:
             slm_class_name = p["slm_class_name"]
             slm_field_name = p["slm_field_name"]
             slm_screen = p["slm_screen"]
             
-            # Set SLM ArelA = 1.0
+            # Set SLM alpha = 1.0
             active_classes = REGISTRY.get("slm:red:active_classes") or []
             if slm_class_name not in active_classes:
                 self._log(f"ERROR: SLM class '{slm_class_name}' is not active.")
@@ -2112,7 +2108,7 @@ class TwoColorScanTab(QWidget):
             time.sleep(0.5)
             
         except Exception as e:
-            self._log(f"ERROR setting SLM to ArelA=1: {e}")
+            self._log(f"ERROR setting SLM to alpha=1: {e}")
             return
         
         # Set 2omega waveplate to zero power
@@ -2162,7 +2158,7 @@ class TwoColorScanTab(QWidget):
             slm_class_name=p["slm_class_name"],
             slm_field_name=p["slm_field_name"],
             slm_screen=p["slm_screen"],
-            slm_calib_arela=self._slm_calib_arela,
+            slm_calib_alpha=self._slm_calib_alpha,
             slm_calib_intensity=self._slm_calib_intensity,
             omega2_max_power_W=p["omega2_max_power_W"],
             omega2_waist_um=p["omega2_waist_um"],
@@ -2226,13 +2222,13 @@ class TwoColorScanTab(QWidget):
                 reply = QMessageBox.question(
                     self,
                     "Run Reference Scan?",
-                    "The scan finished.\n\nDo you want to run the REFERENCE scan now (ArelA=1, on-axis beam dumped)?\n",
+                    "The scan finished.\n\nDo you want to run the REFERENCE scan now (alpha=1, on-axis beam dumped)?\n",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.Yes
                 )
 
                 if reply == QMessageBox.Yes:
-                    self._log("Launching background with reference scan (ArelA=1)...")
+                    self._log("Launching background with reference scan (alpha=1)...")
                     self._launch_background_w_ref(self._last_scan_log_path)
                     return
         """

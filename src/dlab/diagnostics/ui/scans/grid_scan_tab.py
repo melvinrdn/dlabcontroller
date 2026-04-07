@@ -294,10 +294,10 @@ class GridScanWorker(QObject):
     # -------------------------------------------------------------------------
 
     def _save_image(
-        self, det_key: str, dev, frame: np.ndarray, exposure_us: int, tag: str, is_8bit: bool = False
+        self, det_key: str, dev, frame: np.ndarray, exposure_us: int, tag: str, is_8bit: bool = False,meta: dict | None = None
     ) -> str:
         """Save an image and return the filename."""
-        det_name = _detector_display_name(det_key, dev, None)
+        det_name = _detector_display_name(det_key, dev, meta)
         det_day = self.data_root / f"{self.timestamp:%Y-%m-%d}" / det_name
         ts_ms = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         fn = f"{det_name}_{tag}_{ts_ms}.png"
@@ -366,7 +366,7 @@ class GridScanWorker(QObject):
 
         exp_meta = int((meta or {}).get("Exposure_us", exposure_or_int))
         tag = "Background" if self.background else "Image"
-        data_fn = self._save_image(det_key, dev, frame, exp_meta, tag, is_8bit=is_daheng)
+        data_fn = self._save_image(det_key, dev, frame, exp_meta, tag, is_8bit=is_daheng, meta=meta)
         saved_label = f"exp {exp_meta} µs"
 
         return data_fn, saved_label

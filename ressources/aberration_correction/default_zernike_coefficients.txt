@@ -1,11 +1,13 @@
 #Zernike_order_j	Zernike_coefficient (nm rms)
 1	0
-2	100
+2	0
 3	0
-4	0
+4	200
 5	0
-6	1000
+6	150
 7   0
-8	100
+8	0
 9   0
-10	0
+10	200
+
+
