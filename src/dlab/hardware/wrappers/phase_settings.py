@@ -40,7 +40,6 @@ _w_L_config = cfg_get("slm.beam_radius_on_slm")
 w_L = float(_w_L_config) if isinstance(_w_L_config, (int, float, str)) else 3.5e-3
 
 phase_types = [
-    "Background",
     "Lens",
     "Zernike",
     "Binary",
@@ -116,47 +115,6 @@ class TypeFlat(BaseTypeWidget):
 
     def load_(self, settings):
         self.le_flat.setText(settings.get("flat_phase", "0"))
-
-
-class TypeBackground(BaseTypeWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.name = "Background"
-        self.img = None
-        layout = QVBoxLayout(self)
-        group = QGroupBox("Background Correction File")
-        layout.addWidget(group)
-        vlayout = QVBoxLayout(group)
-        self.btn_open = QPushButton("Open Background file")
-        self.btn_open.clicked.connect(self.open_background_file)
-        vlayout.addWidget(self.btn_open)
-        self.lbl_file = QLabel("")
-        self.lbl_file.setWordWrap(True)
-        vlayout.addWidget(self.lbl_file)
-
-    def open_background_file(self):
-        initial_directory = os.path.join(".", "ressources", "background")
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Background File",
-            initial_directory,
-            "CSV Files (*.csv);;Image Files (*.bmp);;Text Files (*.txt);;All Files (*)",
-        )
-        if filepath:
-            self._read_file(filepath)
-            self.lbl_file.setText(filepath)
-
-    def phase(self):
-        return self.img if self.img is not None else np.zeros(slm_size)
-
-    def save_(self):
-        return {"filepath": self.lbl_file.text()}
-
-    def load_(self, settings):
-        filepath = settings.get("filepath", "")
-        self.lbl_file.setText(filepath)
-        if filepath:
-            self._read_file(filepath)
 
 
 class TypeLens(BaseTypeWidget):
@@ -874,7 +832,6 @@ def new_type(parent, typ):
     types_dict = {
         "Flat": TypeFlat,
         "Binary": TypeBinary,
-        "Background": TypeBackground,
         "Lens": TypeLens,
         "Vortex": TypeVortex,
         "Zernike": TypeZernike,
