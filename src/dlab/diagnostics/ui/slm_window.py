@@ -32,7 +32,7 @@ def _slm_path(key: str) -> Path:
 class SlmWindow(QtWidgets.QMainWindow):
     """
     Control window for red and green SLM devices.
-    
+
     Provides phase preview, publishing to screens, and settings management.
     """
     closed = pyqtSignal()
@@ -40,7 +40,8 @@ class SlmWindow(QtWidgets.QMainWindow):
     def __init__(self, log_panel: LogPanel | None = None):
         super().__init__()
         self._log = log_panel
-        self._log.installEventFilter(self)
+        if self._log is not None:
+            self._log.installEventFilter(self)
 
         self.setWindowTitle("SlmWindow")
         self.setMinimumSize(700, 900)
@@ -87,6 +88,49 @@ class SlmWindow(QtWidgets.QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+    def _create_background_group(self, color: str) -> QtWidgets.QGroupBox:
+        """Hardware flatness correction panel: load file once, toggle on/off."""
+        slm: SLMController = getattr(self, f"_slm_{color}")
+        group = QtWidgets.QGroupBox("Hardware background correction")
+        v = QtWidgets.QVBoxLayout(group)
+
+        h = QtWidgets.QHBoxLayout()
+        btn_load = QtWidgets.QPushButton("Load background")
+        cb_on = QtWidgets.QCheckBox("On")
+        cb_on.setChecked(False)
+        h.addWidget(btn_load)
+        h.addWidget(cb_on)
+        v.addLayout(h)
+
+        lbl = QtWidgets.QLabel("(no file loaded)")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+
+        def _load():
+            initial = "."
+            filepath, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Open Background File", initial,
+                "CSV Files (*.csv);;Image Files (*.bmp);;Text Files (*.txt);;All Files (*)",
+            )
+            if not filepath:
+                return
+            try:
+                slm.load_background(filepath)
+            except Exception as e:
+                self._log_message(f"Failed to load {color} background: {e}")
+                return
+            lbl.setText(filepath)
+            cb_on.setChecked(True)
+            self._log_message(f"Loaded {color} background: {filepath}")
+
+        btn_load.clicked.connect(_load)
+        cb_on.toggled.connect(slm.set_background_enabled)
+
+        setattr(self, f"_bg_btn_{color}", btn_load)
+        setattr(self, f"_bg_cb_{color}", cb_on)
+        setattr(self, f"_bg_lbl_{color}", lbl)
+        return group
+
     def _create_slm_panel(self, color: str):
         panel = QtWidgets.QGroupBox(f"{color.capitalize()} SLM Interface")
         layout = QtWidgets.QVBoxLayout(panel)
@@ -103,6 +147,9 @@ class SlmWindow(QtWidgets.QMainWindow):
         hlayout_save.addWidget(btn_load)
         hlayout_save.addWidget(btn_save)
         top_layout.addLayout(hlayout_save)
+
+        # Hardware background correction
+        top_layout.addWidget(self._create_background_group(color))
 
         # Display number
         h_layout_display = QtWidgets.QHBoxLayout()
@@ -259,32 +306,28 @@ class SlmWindow(QtWidgets.QMainWindow):
         checkboxes = getattr(self, f"_checkboxes_{color}")
 
         total_levels = np.zeros(slm.slm_size, dtype=np.uint16)
-        preview_levels = np.zeros(slm.slm_size, dtype=np.uint16)
-        publish_types, preview_types = [], []
-
+        publish_types = []
         active_refs = []
+
         for cb, phase_ref in zip(checkboxes, phase_refs):
             if cb.isChecked():
                 levels = phase_ref.phase()
                 total_levels = (total_levels + levels) % (slm.bit_depth + 1)
                 publish_types.append(phase_ref.name_())
                 active_refs.append(phase_ref)
-                if "background" not in phase_ref.name_().lower():
-                    preview_levels = (preview_levels + levels) % (slm.bit_depth + 1)
-                    preview_types.append(phase_ref.name_())
 
         if color == "red":
             self._update_registry_red(publish_types, active_refs)
 
         slm.phase = total_levels
-        display_phase = self._levels_to_radians(preview_levels, slm.bit_depth)
+        display_phase = self._levels_to_radians(total_levels, slm.bit_depth)
 
         phase_image = getattr(self, f"_phase_image_{color}")
         phase_image.set_data(display_phase)
         canvas = getattr(self, f"_canvas_{color}")
         canvas.draw()
 
-        self._log_message(f"Preview updated for {color} SLM. Types: {', '.join(preview_types)}")
+        self._log_message(f"Preview updated for {color} SLM. Types: {', '.join(publish_types)}")
         return publish_types
 
     def _open_publish_win(self, color: str):
@@ -304,8 +347,8 @@ class SlmWindow(QtWidgets.QMainWindow):
 
         publish_types = self._get_phase(color)
 
-        if slm.phase is None or np.all(slm.phase == 0):
-            QtWidgets.QMessageBox.warning(self, "Error", f"No background image provided for {color} SLM.")
+        if slm.phase is None:
+            QtWidgets.QMessageBox.warning(self, "Error", f"No phase computed for {color} SLM.")
             return
 
         slm.publish(slm.phase, screen_num)
@@ -341,6 +384,7 @@ class SlmWindow(QtWidgets.QMainWindow):
         phase_refs = getattr(self, f"_phase_refs_{color}")
         checkboxes = getattr(self, f"_checkboxes_{color}")
         spin = getattr(self, f"_spin_{color}")
+        slm: SLMController = getattr(self, f"_slm_{color}")
 
         settings = {}
         for phase_ref, cb in zip(phase_refs, checkboxes):
@@ -348,6 +392,10 @@ class SlmWindow(QtWidgets.QMainWindow):
                 "Enabled": cb.isChecked(),
                 "Params": phase_ref.save_(),
             }
+        settings["__background__"] = {
+            "path": slm.background_path or "",
+            "enabled": bool(slm.background_enabled),
+        }
         settings["screen_pos"] = spin.value()
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -373,11 +421,28 @@ class SlmWindow(QtWidgets.QMainWindow):
             checkboxes = getattr(self, f"_checkboxes_{color}")
             spin = getattr(self, f"_spin_{color}")
 
-            for key, phase_ref, cb in zip(data.keys(), phase_refs, checkboxes):
-                if key != "screen_pos" and key in data:
-                    phase_data = data[key]
-                    phase_ref.load_(phase_data["Params"])
+            refs_by_name = {pr.name_(): (pr, cb) for pr, cb in zip(phase_refs, checkboxes)}
+            for key, phase_data in data.items():
+                if key in ("screen_pos", "__background__"):
+                    continue
+                if key in refs_by_name:
+                    pr, cb = refs_by_name[key]
+                    pr.load_(phase_data["Params"])
                     cb.setChecked(phase_data["Enabled"])
+
+            if "__background__" in data:
+                bg_info = data["__background__"]
+                slm: SLMController = getattr(self, f"_slm_{color}")
+                bg_lbl = getattr(self, f"_bg_lbl_{color}")
+                bg_cb = getattr(self, f"_bg_cb_{color}")
+                path = bg_info.get("path", "")
+                if path:
+                    try:
+                        slm.load_background(path)
+                        bg_lbl.setText(path)
+                    except Exception as e:
+                        self._log_message(f"Could not reload {color} background {path}: {e}")
+                bg_cb.setChecked(bool(bg_info.get("enabled", False)))
 
             if "screen_pos" in data:
                 spin.setValue(data["screen_pos"])
@@ -391,7 +456,7 @@ class SlmWindow(QtWidgets.QMainWindow):
             rel_path = path.resolve().relative_to(ressources_dir()).as_posix()
         except ValueError:
             rel_path = str(path.resolve())
-            
+
         defaults_path = _slm_path("defaults_file")
         data = read_yaml(defaults_path)
         data[f"{color}_default_path"] = rel_path
