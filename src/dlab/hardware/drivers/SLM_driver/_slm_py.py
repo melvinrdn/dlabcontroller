@@ -1,5 +1,18 @@
 import ctypes as ct
-import dlab.hardware.drivers.SLM_driver._slm_win as dll
+import sys
+
+if sys.platform == "win32":
+    import dlab.hardware.drivers.SLM_driver._slm_win as dll
+else:
+    # Linux dev stub: no Santec hardware available.
+    class _DllStub:
+        def __getattr__(self, name):
+            def _noop(*args, **kwargs):
+                print(f"[slm stub] {name}({args}, {kwargs})")
+                return 0  # SLM_OK
+            return _noop
+    dll = _DllStub()
+    
 import numpy as np
 import warnings
 from os.path import exists
