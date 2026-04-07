@@ -8,6 +8,8 @@ version = "2.2.0"
 requires-python = ">=3.10"
 dependencies = [
   "PyQt5",
+  "pyqt5-qt5==5.15.2 ; sys_platform == 'win32'",
+  "pyqt5-qt5 ; sys_platform != 'win32'",
   "pyyaml",
   "numpy",
   "matplotlib",
@@ -15,12 +17,15 @@ dependencies = [
   "pyserial",
   "pylablib",
   "ThorlabsPM100",
-  "thorlabs-apt",
+  "thorlabs-apt ; sys_platform == 'linux' or sys_platform == 'win32'",
   "pyvisa",
   "scipy",
   "zaber-motion",
-  "cmasher"
+  "cmasher",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
 
 [project.scripts]
 dlab = "dlab.app:main"
@@ -31,3 +36,6 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["dlab*"]
+
+[tool.uv]
+package = true
