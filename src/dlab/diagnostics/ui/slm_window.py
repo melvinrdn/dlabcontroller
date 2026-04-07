@@ -305,29 +305,41 @@ class SlmWindow(QtWidgets.QMainWindow):
         phase_refs = getattr(self, f"_phase_refs_{color}")
         checkboxes = getattr(self, f"_checkboxes_{color}")
 
-        total_levels = np.zeros(slm.slm_size, dtype=np.uint16)
+        logical = np.zeros(slm.slm_size, dtype=np.int64)
         publish_types = []
         active_refs = []
 
         for cb, phase_ref in zip(checkboxes, phase_refs):
             if cb.isChecked():
                 levels = phase_ref.phase()
-                total_levels = (total_levels + levels) % (slm.bit_depth + 1)
+                logical = logical + levels.astype(np.int64)
                 publish_types.append(phase_ref.name_())
                 active_refs.append(phase_ref)
+
+        # Logical phase only (no bg). publish() will add bg if enabled.
+        logical_wrapped = np.mod(logical, slm.bit_depth + 1).astype(np.uint16)
+        slm.phase = logical_wrapped
+
+        # Preview shows logical + bg (matches what the SLM actually receives).
+        if slm.background_enabled and slm.background_phase is not None:
+            preview = np.mod(logical + slm.background_phase.astype(np.int64),
+                            slm.bit_depth + 1).astype(np.uint16)
+        else:
+            preview = logical_wrapped
 
         if color == "red":
             self._update_registry_red(publish_types, active_refs)
 
-        slm.phase = total_levels
-        display_phase = self._levels_to_radians(total_levels, slm.bit_depth)
-
+        display_phase = self._levels_to_radians(preview, slm.bit_depth)
         phase_image = getattr(self, f"_phase_image_{color}")
         phase_image.set_data(display_phase)
         canvas = getattr(self, f"_canvas_{color}")
         canvas.draw()
 
-        self._log_message(f"Preview updated for {color} SLM. Types: {', '.join(publish_types)}")
+        bg_tag = " + bg" if (slm.background_enabled and slm.background_phase is not None) else ""
+        self._log_message(
+            f"Preview updated for {color} SLM. Types: {', '.join(publish_types)}{bg_tag}"
+        )
         return publish_types
 
     def _open_publish_win(self, color: str):
@@ -341,7 +353,8 @@ class SlmWindow(QtWidgets.QMainWindow):
         other_status = getattr(self, f"_slm_{other_color}_status")
         if other_status != "closed" and f"Screen {screen_num}" in other_status:
             QtWidgets.QMessageBox.warning(
-                self, "Error", f"Screen {screen_num} is already in use by {other_color.capitalize()} SLM."
+                self, "Error",
+                f"Screen {screen_num} is already in use by {other_color.capitalize()} SLM."
             )
             return
 
@@ -351,13 +364,19 @@ class SlmWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Error", f"No phase computed for {color} SLM.")
             return
 
+        # slm.phase is the logical-only phase. publish() adds the hardware bg internally.
         slm.publish(slm.phase, screen_num)
+
         REGISTRY.register("slm:red:active_classes", publish_types)
         REGISTRY.register("slm:red:widgets", getattr(self, "_phase_refs_red"))
         REGISTRY.register("slm:red:controller", slm)
 
+        bg_tag = " + bg" if (slm.background_enabled and slm.background_phase is not None) else ""
         setattr(self, f"_slm_{color}_status", f"displaying (Screen {screen_num})")
-        self._log_message(f"Published {color} SLM phase on screen {screen_num}. Types: {', '.join(publish_types)}")
+        self._log_message(
+            f"Published {color} SLM phase on screen {screen_num}. "
+            f"Types: {', '.join(publish_types)}{bg_tag}"
+        )
         self._update_status_bar()
 
     def _close_publish_win(self, color: str):
