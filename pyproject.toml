@@ -39,3 +39,11 @@ include = ["dlab*"]
 
 [tool.uv]
 package = true
+
+[dependency-groups]
+dev = [
+    "furo>=2025.12.19",
+    "myst-parser>=4.0.1",
+    "sphinx>=8.1.3",
+    "sphinx-autodoc-typehints>=3.0.1",
+]
