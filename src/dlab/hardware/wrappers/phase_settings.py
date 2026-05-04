@@ -669,17 +669,17 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         grid = QGridLayout(group)
 
         row = 0
-        grid.addWidget(QLabel("Wavelength [nm]:"), row, 0)
+        grid.addWidget(QLabel("Wavelength λ [nm]:"), row, 0)
         self.le_wl = QLineEdit("1030")
         grid.addWidget(self.le_wl, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("Focal length f_focus [m]:"), row, 0)
-        self.le_f = QLineEdit("0.175")
+        grid.addWidget(QLabel("Focal length f [m]:"), row, 0)
+        self.le_f = QLineEdit("0.2")
         grid.addWidget(self.le_f, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("Separation at focus D [µm]:"), row, 0)
+        grid.addWidget(QLabel("Focus separation d_s [µm]:"), row, 0)
         self.le_sep = QLineEdit("50")
         grid.addWidget(self.le_sep, row, 1)
         row += 1
@@ -689,39 +689,39 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         grid.addWidget(self.le_dphi_pi, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("Checker pitch p [µm]:"), row, 0)
-        self.le_pitch = QLineEdit("128")
-        grid.addWidget(self.le_pitch, row, 1)
+        grid.addWidget(QLabel("Pixels per patch M:"), row, 0)
+        self.le_M = QLineEdit("16")
+        grid.addWidget(self.le_M, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("Angle (deg):"), row, 0)
+        grid.addWidget(QLabel("Angle [deg]:"), row, 0)
         self.le_angle = QLineEdit("0.0")
         grid.addWidget(self.le_angle, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("α (intensity fraction):"), row, 0)
+        grid.addWidget(QLabel("α (intensity split A vs B):"), row, 0)
         self.le_alpha = QLineEdit("0.5")
         grid.addWidget(self.le_alpha, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("α_dump_A (dump A fraction):"), row, 0)
-        self.le_alpha_dump_A = QLineEdit("0.0")
-        grid.addWidget(self.le_alpha_dump_A, row, 1)
+        grid.addWidget(QLabel("β_a (dump fraction on A):"), row, 0)
+        self.le_beta_a = QLineEdit("0.0")
+        grid.addWidget(self.le_beta_a, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("α_dump_B (dump B fraction):"), row, 0)
-        self.le_alpha_dump_B = QLineEdit("0.0")
-        grid.addWidget(self.le_alpha_dump_B, row, 1)
+        grid.addWidget(QLabel("β_b (dump fraction on B):"), row, 0)
+        self.le_beta_b = QLineEdit("0.0")
+        grid.addWidget(self.le_beta_b, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("Dump angle factor A:"), row, 0)
-        self.le_dumpA = QLineEdit("10")
-        grid.addWidget(self.le_dumpA, row, 1)
+        grid.addWidget(QLabel("n_d^A (dump A deflection factor):"), row, 0)
+        self.le_n_d_a = QLineEdit("8")
+        grid.addWidget(self.le_n_d_a, row, 1)
         row += 1
 
-        grid.addWidget(QLabel("Dump angle factor B:"), row, 0)
-        self.le_dumpB = QLineEdit("10")
-        grid.addWidget(self.le_dumpB, row, 1)
+        grid.addWidget(QLabel("n_d^B (dump B deflection factor):"), row, 0)
+        self.le_n_d_b = QLineEdit("8")
+        grid.addWidget(self.le_n_d_b, row, 1)
         row += 1
 
         self.cb_noA = QCheckBox("No tilt A")
@@ -734,63 +734,65 @@ class TypeTwoFociStochastic(BaseTypeWidget):
     def phase(self):
         try:
             wl = float(self.le_wl.text()) * 1e-9
-            f_focus = float(self.le_f.text())
-            D = float(self.le_sep.text()) * 1e-6
+            f = float(self.le_f.text())
+            d_s = float(self.le_sep.text()) * 1e-6
             dphi = float(self.le_dphi_pi.text()) * np.pi
-            pitch = float(self.le_pitch.text()) * 1e-6
+            M = int(float(self.le_M.text()))
             angle_deg = float(self.le_angle.text())
             alpha = float(self.le_alpha.text())
-            alpha_dump_a = float(self.le_alpha_dump_A.text())
-            alpha_dump_b = float(self.le_alpha_dump_B.text())
-            dumpA = float(self.le_dumpA.text())
-            dumpB = float(self.le_dumpB.text())
+            beta_a = float(self.le_beta_a.text())
+            beta_b = float(self.le_beta_b.text())
+            n_d_a = float(self.le_n_d_a.text())
+            n_d_b = float(self.le_n_d_b.text())
         except:
             return np.zeros(slm_size)
 
-        if wl <= 0 or f_focus == 0 or pitch <= 0:
+        if wl <= 0 or f == 0 or M < 1:
             return np.zeros(slm_size)
-        if not (0 <= alpha <= 1 and 0 <= alpha_dump_a <= 1 and 0 <= alpha_dump_b <= 1):
+        if not (0 <= alpha <= 1 and 0 <= beta_a <= 1 and 0 <= beta_b <= 1):
             return np.zeros(slm_size)
+
+        patch_size = M * pixel_size   # ℓ = M·p
 
         x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
         y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
         X, Y = np.meshgrid(x, y, indexing="xy")
 
         ang = np.deg2rad(angle_deg)
-        U = X * np.cos(ang) + Y * np.sin(ang)
+        U = X * np.cos(ang) + Y * np.sin(ang)        # main axis
+        V = -X * np.sin(ang) + Y * np.cos(ang)       # orthogonal axis (dump)
 
         k0 = 2 * np.pi / wl
-        kt = k0 * D / (2 * f_focus)
+        k_t = k0 * d_s / (2 * f)
 
         tilt_a = not self.cb_noA.isChecked()
         tilt_b = not self.cb_noB.isChecked()
 
-        phiA = kt * U if tilt_a else 0.0
-        phiB = (-kt * U if tilt_b else 0.0) + dphi
+        phi_A = k_t * U if tilt_a else 0.0
+        phi_B = (-k_t * U if tilt_b else 0.0) + dphi
 
-        kdumpA = dumpA * kt
-        kdumpB = dumpB * kt
-        phiAD = +kdumpA * U
-        phiBD = -kdumpB * U
+        k_d_a = n_d_a * k_t
+        k_d_b = n_d_b * k_t
+        phi_Ap = +k_d_a * V    # dump A along orthogonal axis
+        phi_Bp = -k_d_b * V    # dump B along orthogonal axis
 
         sa, sb = np.sqrt(1 - alpha), np.sqrt(alpha)
-        xiA = 0.0 if sa + sb == 0 else sa / (sa + sb)
+        xi_A_tot = 0.0 if sa + sb == 0 else sa / (sa + sb)
 
-        ix = np.floor((X - X.min()) / pitch).astype(np.int64)
-        iy = np.floor((Y - Y.min()) / pitch).astype(np.int64)
+        ix = np.floor((X - X.min()) / patch_size).astype(np.int64)
+        iy = np.floor((Y - Y.min()) / patch_size).astype(np.int64)
         pid = iy * (ix.max() + 1) + ix
         uniq, inv = np.unique(pid, return_inverse=True)
 
         rng = np.random.default_rng(1234)
-        sideA = rng.random(uniq.size)[inv] < xiA
-        u_int = rng.random(uniq.size)[inv]
+        side_is_A = rng.random(uniq.size)[inv] < xi_A_tot
+        u_dump = rng.random(uniq.size)[inv]
 
-        mainA = sideA & (u_int < np.sqrt(1 - alpha_dump_a))
-        mainB = (~sideA) & (u_int < np.sqrt(1 - alpha_dump_b))
+        main_A = side_is_A & (u_dump < np.sqrt(1 - beta_a))
+        main_B = (~side_is_A) & (u_dump < np.sqrt(1 - beta_b))
 
-        phase = np.where(mainA, phiA, np.where(sideA, phiAD, 0.0)) + np.where(
-            mainB, phiB, np.where(~sideA, phiBD, 0.0)
-        )
+        phase = (np.where(main_A, phi_A, np.where(side_is_A, phi_Ap, 0.0))
+                 + np.where(main_B, phi_B, np.where(~side_is_A, phi_Bp, 0.0)))
 
         wrapped = np.mod(phase, 2 * np.pi)
         return wrapped * (bit_depth / (2 * np.pi))
@@ -798,35 +800,34 @@ class TypeTwoFociStochastic(BaseTypeWidget):
     def save_(self):
         return {
             "wl_nm": self.le_wl.text(),
-            "f_focus_m": self.le_f.text(),
-            "sep_um": self.le_sep.text(),
+            "f_m": self.le_f.text(),
+            "d_s_um": self.le_sep.text(),
             "dphi_pi": self.le_dphi_pi.text(),
-            "pitch_um": self.le_pitch.text(),
+            "M": self.le_M.text(),
             "angle_deg": self.le_angle.text(),
             "alpha": self.le_alpha.text(),
-            "alpha_dump_A": self.le_alpha_dump_A.text(),
-            "alpha_dump_B": self.le_alpha_dump_B.text(),
-            "dumpA": self.le_dumpA.text(),
-            "dumpB": self.le_dumpB.text(),
+            "beta_a": self.le_beta_a.text(),
+            "beta_b": self.le_beta_b.text(),
+            "n_d_a": self.le_n_d_a.text(),
+            "n_d_b": self.le_n_d_b.text(),
             "noA": self.cb_noA.isChecked(),
             "noB": self.cb_noB.isChecked(),
         }
 
     def load_(self, s):
         self.le_wl.setText(s.get("wl_nm", "1030"))
-        self.le_f.setText(s.get("f_focus_m", "0.175"))
-        self.le_sep.setText(s.get("sep_um", "100"))
+        self.le_f.setText(s.get("f_m", "0.2"))
+        self.le_sep.setText(s.get("d_s_um", "50"))
         self.le_dphi_pi.setText(s.get("dphi_pi", "0.0"))
-        self.le_pitch.setText(s.get("pitch_um", "128"))
+        self.le_M.setText(s.get("M", "16"))
         self.le_angle.setText(s.get("angle_deg", "0.0"))
         self.le_alpha.setText(s.get("alpha", "0.5"))
-        self.le_alpha_dump_A.setText(s.get("alpha_dump_A", "0.0"))
-        self.le_alpha_dump_B.setText(s.get("alpha_dump_B", "0.0"))
-        self.le_dumpA.setText(s.get("dumpA", "10"))
-        self.le_dumpB.setText(s.get("dumpB", "10"))
+        self.le_beta_a.setText(s.get("beta_a", "0.0"))
+        self.le_beta_b.setText(s.get("beta_b", "0.0"))
+        self.le_n_d_a.setText(s.get("n_d_a", "8"))
+        self.le_n_d_b.setText(s.get("n_d_b", "8"))
         self.cb_noA.setChecked(s.get("noA", False))
         self.cb_noB.setChecked(s.get("noB", False))
-
 
 def new_type(parent, typ):
     types_dict = {
