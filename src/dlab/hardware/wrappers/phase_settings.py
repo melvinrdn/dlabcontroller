@@ -723,6 +723,11 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.le_n_d_b = QLineEdit("8")
         grid.addWidget(self.le_n_d_b, row, 1)
         row += 1
+        
+        grid.addWidget(QLabel("seed:"), row, 0)
+        self.le_seed = QLineEdit("123456")
+        grid.addWidget(self.le_seed, row, 1)
+        row += 1
 
         self.cb_noA = QCheckBox("No tilt A")
         self.cb_noB = QCheckBox("No tilt B")
@@ -744,6 +749,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
             beta_b = float(self.le_beta_b.text())
             n_d_a = float(self.le_n_d_a.text())
             n_d_b = float(self.le_n_d_b.text())
+            seed = float(self.le_seed.text())
         except:
             return np.zeros(slm_size)
 
@@ -784,7 +790,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         pid = iy * (ix.max() + 1) + ix
         uniq, inv = np.unique(pid, return_inverse=True)
 
-        rng = np.random.default_rng(1234)
+        rng = np.random.default_rng(int(seed))
         side_is_A = rng.random(uniq.size)[inv] < xi_A_tot
         u_dump = rng.random(uniq.size)[inv]
 
@@ -810,6 +816,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
             "beta_b": self.le_beta_b.text(),
             "n_d_a": self.le_n_d_a.text(),
             "n_d_b": self.le_n_d_b.text(),
+            "seed": self.le_seed.text(),
             "noA": self.cb_noA.isChecked(),
             "noB": self.cb_noB.isChecked(),
         }
@@ -826,6 +833,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.le_beta_b.setText(s.get("beta_b", "0.0"))
         self.le_n_d_a.setText(s.get("n_d_a", "8"))
         self.le_n_d_b.setText(s.get("n_d_b", "8"))
+        self.le_seed.setText(s.get("seed", "123456"))
         self.cb_noA.setChecked(s.get("noA", False))
         self.cb_noB.setChecked(s.get("noB", False))
 
