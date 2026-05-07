@@ -43,6 +43,7 @@ class DlabControllerWindow(QMainWindow):
             "scan": None,
             "phase_lock_2w": None,
             "phase_lock_3w": None,
+            "lumenera": None,
         }
         self._daheng_windows: dict[str, QWidget] = {}
         self._camera_controls: dict[str, QSpinBox] = {}
@@ -64,6 +65,7 @@ class DlabControllerWindow(QMainWindow):
         buttons = [
             ("Open SLM", self._open_slm),
             ("Open Andor", self._open_andor),
+            ("Open Lumenera SP402S", self._open_lumenera),
             ("Open Avaspec ω", self._open_avaspec_w),
             ("Open Avaspec 2ω", self._open_avaspec_2w),
             ("Open Avaspec 3ω", self._open_avaspec_3w),
@@ -189,6 +191,18 @@ class DlabControllerWindow(QMainWindow):
         from dlab.diagnostics.ui.andor_live_window import AndorLiveWindow
 
         self._open_window("andor", AndorLiveWindow, "Andor", self._log)
+        
+    def _open_lumenera(self):
+        from dlab.diagnostics.ui.lumenera_live_window import LumeneraLiveWindow
+
+        self._open_window(
+            "lumenera",
+            LumeneraLiveWindow,
+            "Lumenera SP402S",
+            camera_name="SP402S",
+            fixed_index=1,
+            log_panel=self._log,
+        )
 
     def _open_avaspec_w(self):
         from dlab.diagnostics.ui.avaspec_live_window import AvaspecLiveWindow
