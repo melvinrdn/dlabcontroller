@@ -388,6 +388,7 @@ version = "2.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "cmasher" },
+    { name = "lucam" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -428,6 +429,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cmasher" },
+    { name = "lucam", specifier = ">=2022.9.27" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "prometheus-client" },
@@ -768,6 +770,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/11/03/16090dd6f74ba2b8b922276047f15962fbeea0a75d5601607edb301ba945/llvmlite-0.47.0-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:fa1cbd800edd3b20bc141521f7fd45a6185a5b84109aa6855134e81397ffe72b", size = 56275178, upload-time = "2026-03-31T18:29:42.58Z" },
     { url = "https://files.pythonhosted.org/packages/f5/cb/0abf1dd4c5286a95ffe0c1d8c67aec06b515894a0dd2ac97f5e27b82ab0b/llvmlite-0.47.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f6725179b89f03b17dabe236ff3422cb8291b4c1bf40af152826dfd34e350ae8", size = 55128632, upload-time = "2026-03-31T18:29:46.939Z" },
     { url = "https://files.pythonhosted.org/packages/4f/79/d3bbab197e86e0ff4f9c07122895b66a3e0d024247fcff7f12c473cb36d9/llvmlite-0.47.0-cp314-cp314t-win_amd64.whl", hash = "sha256:6842cf6f707ec4be3d985a385ad03f72b2d724439e118fcbe99b2929964f0453", size = 39153839, upload-time = "2026-03-31T18:29:51.004Z" },
+]
+
+[[package]]
+name = "lucam"
+version = "2022.9.27"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/a0/a12d816d13cb67481424add00fe41a6727853d94dabc663bb08702625aa6/lucam-2022.9.27.tar.gz", hash = "sha256:bcf44d488b5a1f10bff6172118824730feb3c128ebf1ce4081888ccd86ba6610", size = 27477, upload-time = "2022-09-27T19:11:56.405Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/93/b1/c0a358afe0fdd55df1e72aeeb6927383ac5108acd1d073db3ba82597bc7f/lucam-2022.9.27-py3-none-any.whl", hash = "sha256:9c4e3934c8e5f9292182c0b10021feba6a51fb2430fac905effe196c25ceea85", size = 27639, upload-time = "2022-09-27T19:11:54.728Z" },
 ]
 
 [[package]]

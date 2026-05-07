@@ -22,6 +22,7 @@ dependencies = [
   "scipy",
   "zaber-motion",
   "cmasher",
+  "lucam>=2022.9.27",
 ]
 
 [project.optional-dependencies]
