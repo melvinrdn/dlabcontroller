@@ -185,6 +185,7 @@ class GridScanWorker(QObject):
         background: bool = False,
         existing_scan_log: str | None = None,
         axes_meta: dict | None = None,
+        single_shot: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -198,6 +199,7 @@ class GridScanWorker(QObject):
         self.existing_scan_log = existing_scan_log
         self.abort = False
         self.axes_meta = axes_meta or {}
+        self.single_shot = bool(single_shot)
         self.data_root = data_dir()
         self.timestamp = datetime.datetime.now()
 
@@ -209,8 +211,17 @@ class GridScanWorker(QObject):
     # -------------------------------------------------------------------------
 
     def _cartesian_indices(self):
-        """Yield all index combinations for the grid scan."""
+        """Yield all index combinations for the grid scan.
+
+        In single_shot mode, yield only the last point (current axis positions).
+        """
         lengths = [len(pos) for _, pos in self.axes]
+
+        if self.single_shot:
+            # Only the final point of each axis — this matches where the stages
+            # were left at the end of the previous scan.
+            yield [L - 1 for L in lengths]
+            return
 
         def rec(level, idxs):
             if level == len(lengths):
@@ -589,10 +600,13 @@ class GridScanWorker(QObject):
             return
 
         # Calculate total points
-        lengths = [len(pos) for _, pos in self.axes]
-        total_points = 1
-        for L in lengths:
-            total_points *= max(1, L)
+        if self.single_shot:
+            total_points = 1
+        else:
+            lengths = [len(pos) for _, pos in self.axes]
+            total_points = 1
+            for L in lengths:
+                total_points *= max(1, L)
         total_images = total_points * max(1, len(self.camera_params))
         done = 0
 
@@ -612,23 +626,24 @@ class GridScanWorker(QObject):
                     self.finished.emit("")
                     return
 
-                # Move all axes
-                move_ok = True
-                for ax, move_val in move_targets:
-                    try:
-                        if ax.startswith("slm:"):
-                            self._move_slm_axis(ax, move_val)
-                        else:
-                            stages[ax].move_to(float(move_val), blocking=True)
-                    except Exception as e:
-                        self._emit(f"Move {ax} -> {move_val:.6f} failed: {e}")
-                        move_ok = False
-                        break
+                # Move all axes (skip in single-shot mode — stages already at final position)
+                if not self.single_shot:
+                    move_ok = True
+                    for ax, move_val in move_targets:
+                        try:
+                            if ax.startswith("slm:"):
+                                self._move_slm_axis(ax, move_val)
+                            else:
+                                stages[ax].move_to(float(move_val), blocking=True)
+                        except Exception as e:
+                            self._emit(f"Move {ax} -> {move_val:.6f} failed: {e}")
+                            move_ok = False
+                            break
 
-                if not move_ok:
-                    continue
+                    if not move_ok:
+                        continue
 
-                time.sleep(float(self.settle_s))
+                    time.sleep(float(self.settle_s))
 
                 # Capture from all detectors
                 for det_key, dev in detectors.items():
@@ -1176,7 +1191,7 @@ class GridScanTab(QWidget):
         self._launch(background=False, existing=None)
         self._log_message("Scan started…")
 
-    def _launch(self, background: bool, existing: str | None) -> None:
+    def _launch(self, background: bool, existing: str | None, single_shot: bool = False) -> None:
         p = self._cached_params
         if not p:
             return
@@ -1192,6 +1207,7 @@ class GridScanTab(QWidget):
             background=background,
             existing_scan_log=existing,
             axes_meta=p.get("axes_meta", {}),
+            single_shot=single_shot,
         )
 
         self._worker.moveToThread(self._thread)
@@ -1205,10 +1221,13 @@ class GridScanTab(QWidget):
         self._abort_btn.setEnabled(True)
 
         # Calculate total points
-        total = 1
-        for _, pos in p["axes"]:
-            total *= max(1, len(pos))
-        total *= max(1, len(p["camera_params"]))
+        if single_shot:
+            total = max(1, len(p["camera_params"]))
+        else:
+            total = 1
+            for _, pos in p["axes"]:
+                total *= max(1, len(pos))
+            total *= max(1, len(p["camera_params"]))
         self._progress.setMaximum(total)
         self._progress.setValue(0)
 
@@ -1240,21 +1259,36 @@ class GridScanTab(QWidget):
         self._thread = None
         self._worker = None
 
-        # Offer background scan
+        # Offer background options
         if not self._doing_background and self._last_scan_log_path is not None:
-            reply = QMessageBox.question(
-                self,
-                "Run Background Scan?",
-                "The scan finished.\n\nDo you want to run the BACKGROUND scan now?\n"
-                "If yes, cut the gas and wait 3-5min before continuing.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+            box = QMessageBox(self)
+            box.setWindowTitle("Background?")
+            box.setText(
+                "The scan finished.\n\nDo you want to acquire background?\n"
+                "Cut the gas and wait 3-5 min before continuing."
             )
+            btn_full = box.addButton("Full background scan", QMessageBox.AcceptRole)
+            btn_single = box.addButton("Single background image", QMessageBox.AcceptRole)
+            btn_no = box.addButton("No", QMessageBox.RejectRole)
+            box.setDefaultButton(btn_no)
+            box.exec_()
 
-            if reply == QMessageBox.Yes:
+            clicked = box.clickedButton()
+            if clicked is btn_full:
                 self._doing_background = True
-                self._log_message("Launching background scan…")
+                self._log_message("Launching full background scan…")
                 self._launch(background=True, existing=self._last_scan_log_path)
+                return
+            elif clicked is btn_single:
+                self._doing_background = True
+                self._log_message("Acquiring single background image at last scan position…")
+                self._launch(
+                    background=True,
+                    existing=self._last_scan_log_path,
+                    single_shot=True,
+                )
                 return
 
         self._doing_background = False
+        
+        
