@@ -363,16 +363,12 @@ class GridScanWorker(QObject):
             frame, meta = dev.grab_frame_for_scan(
                 averages=int(averages),
                 background=self.background,
-                dead_pixel_cleanup=True,
                 exposure_us=int(exposure_or_int),
-                force_roi=True,
             )
         except TypeError:
             frame, meta = dev.grab_frame_for_scan(
                 averages=int(averages),
                 background=self.background,
-                dead_pixel_cleanup=True,
-                force_roi=True,
             )
 
         exp_meta = int((meta or {}).get("Exposure_us", exposure_or_int))
@@ -895,7 +891,13 @@ class GridScanTab(QWidget):
             self._stage_picker.addItem(f"slm:{t}")
 
         self._cam_picker.clear()
-        for prefix in ("camera:daheng:", "camera:andor:", "spectrometer:avaspec:", "powermeter:"):
+        for prefix in (
+            "camera:daheng:",
+            "camera:andor:",
+            "camera:lumenera:",
+            "spectrometer:avaspec:",
+            "powermeter:",
+        ):
             for k in REGISTRY.keys(prefix):
                 if ":index:" not in k:
                     self._cam_picker.addItem(k)

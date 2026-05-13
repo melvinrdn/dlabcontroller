@@ -1266,27 +1266,21 @@ class LumeneraLiveWindow(QWidget):
         self,
         averages: int = 1,
         adaptive=None,
-        dead_pixel_cleanup: bool = False,
         background: bool = False,
-        *,
-        force_roi: bool = False,
     ):
         """Grab frame(s) for use in scanning routines. Returns float32 averaged frame."""
         if not self._cam:
             raise LumeneraControllerError("Camera not activated.")
-
         was_live = bool(self._live_running)
         if was_live:
             try:
                 self._stop_capture()
             except Exception:
                 pass
-
         try:
             exp_us = int(self._exposure_edit.text())
         except ValueError:
             exp_us = DEFAULT_EXPOSURE_US
-
         try:
             device_gain = int(self._gain_edit.text())
         except ValueError:
@@ -1297,35 +1291,27 @@ class LumeneraLiveWindow(QWidget):
             self._cam.set_gain(device_gain)
             return self._cam.capture_single(cur_exp_us, device_gain)
 
+        # Accumulate raw and dark-subtracted frames separately:
+        # - raw goes to the GUI (which will subtract the dark itself in _update_image)
+        # - dark-subtracted goes to the scan (analysis-ready data)
+        # This avoids double subtraction when the scan reuses the live display path.
         n = max(1, int(averages))
-        acc = None
-
+        acc_raw = None
+        acc_sub = None
         for _ in range(n):
             f = np.asarray(_cap_once(exp_us), dtype=np.float32)
-            f = self._maybe_subtract_dark(f)
-            if (force_roi or self._use_roi_cb.isChecked()) and self._roi_px is not None:
-                x0, y0, x1, y1 = self._roi_px
-                h0, w0 = f.shape
-                x0 = max(0, min(w0 - 1, x0))
-                x1 = max(1, min(w0, x1))
-                y0 = max(0, min(h0 - 1, y0))
-                y1 = max(1, min(h0, y1))
-                f = f[y0:y1, x0:x1]
-            acc = f if acc is None else (acc + f)
+            acc_raw = f if acc_raw is None else (acc_raw + f)
+            f_sub = self._maybe_subtract_dark(f)
+            acc_sub = f_sub if acc_sub is None else (acc_sub + f_sub)
 
-        avg = acc / n
+        avg_raw = acc_raw / n
+        avg_sub = acc_sub / n
 
-        if dead_pixel_cleanup:
-            avg[avg >= SATURATION_VALUE] = 0.0
-            avg[avg < 0.0] = 0.0
-            p9999 = np.percentile(avg, 99.99)
-            if p9999 > SATURATION_VALUE:
-                avg[avg > p9999] = 0.0
-
-        # Display: feed back as uint16 for the live view
-        frame_disp = np.clip(avg, 0, 65535).astype(np.uint16)
+        # Display: send raw frame, _update_image will subtract dark if enabled
+        frame_disp = np.clip(avg_raw, 0, 65535).astype(np.uint16)
         self.gui_update_image.emit(frame_disp)
 
+        roi = self._cam.current_roi
         meta = {
             "CameraName": f"LumeneraCam_{self._fixed_index}",
             "CameraIndex": self._fixed_index,
@@ -1334,18 +1320,11 @@ class LumeneraLiveWindow(QWidget):
             "Background": "1" if background else "0",
             "BitDepth": "16",
             "DarkSubtracted": "1" if self._subtract_dark_cb.isChecked() else "0",
-            "ROI_px": (
-                ""
-                if self._roi_px is None
-                else f"{self._roi_px[0]},{self._roi_px[1]},{self._roi_px[2]},{self._roi_px[3]}"
-            ),
-            "ROI_Used": (
-                "1"
-                if (force_roi or (self._use_roi_cb.isChecked() and self._roi_px is not None))
-                else "0"
-            ),
+            "ROI_px": "" if roi is None else f"{roi[0]},{roi[1]},{roi[2]},{roi[3]}",
+            "ROI_Used": "1" if roi is not None else "0",
         }
-        return avg.astype(np.float32, copy=False), meta
+        # Return dark-subtracted data for the scan
+        return avg_sub.astype(np.float32, copy=False), meta
 
     # -------------------------------------------------------------------------
     # Cleanup

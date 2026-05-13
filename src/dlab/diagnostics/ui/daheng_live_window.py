@@ -1024,27 +1024,21 @@ class DahengLiveWindow(QWidget):
         self,
         averages: int = 1,
         adaptive=None,
-        dead_pixel_cleanup: bool = False,
         background: bool = False,
-        *,
-        force_roi: bool = False,
     ):
         """Grab frame(s) for use in scanning routines."""
         if not self._cam:
             raise DahengControllerError("Camera not activated.")
-
         was_live = bool(self._live_running)
         if was_live:
             try:
                 self._stop_capture()
             except Exception:
                 pass
-
         try:
             exp_us = int(self._exposure_edit.text())
         except ValueError:
             exp_us = DEFAULT_EXPOSURE_US
-
         try:
             device_gain = int(self._gain_edit.text())
         except ValueError:
@@ -1057,10 +1051,9 @@ class DahengLiveWindow(QWidget):
 
         n = max(1, int(averages))
         acc = None
-
         for _ in range(n):
             f = np.asarray(_cap_once(exp_us), dtype=np.float32)
-            if (force_roi or self._use_roi_cb.isChecked()) and self._roi_px is not None:
+            if self._use_roi_cb.isChecked() and self._roi_px is not None:
                 x0, y0, x1, y1 = self._roi_px
                 h0, w0 = f.shape
                 x0 = max(0, min(w0 - 1, x0))
@@ -1069,19 +1062,9 @@ class DahengLiveWindow(QWidget):
                 y1 = max(1, min(h0, y1))
                 f = f[y0:y1, x0:x1]
             acc = f if acc is None else (acc + f)
-
         avg = acc / n
-
-        if dead_pixel_cleanup:
-            avg[avg >= 65535.0] = 0.0
-            avg[avg < 0.0] = 0.0
-            p9999 = np.percentile(avg, 99.99)
-            if p9999 > 65535.0:
-                avg[avg > p9999] = 0.0
-
         frame_u8 = np.clip(avg, 0, 255).astype(np.uint8)
         self.gui_update_image.emit(frame_u8)
-
         meta = {
             "CameraName": f"DahengCam_{self._fixed_index}",
             "CameraIndex": self._fixed_index,
@@ -1095,7 +1078,7 @@ class DahengLiveWindow(QWidget):
             ),
             "ROI_Used": (
                 "1"
-                if (force_roi or (self._use_roi_cb.isChecked() and self._roi_px is not None))
+                if (self._use_roi_cb.isChecked() and self._roi_px is not None)
                 else "0"
             ),
         }
