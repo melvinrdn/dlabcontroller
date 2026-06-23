@@ -1176,10 +1176,7 @@ class LumeneraLiveWindow(QWidget):
         self, frame: np.ndarray, filepath: Path, exp_us: int, gain: int,
         comment: str, dark_subtracted: bool
     ):
-        # If the frame went through dark subtraction it's float32 with possibly
-        # negative values. We clip to [0, 65535] for PNG storage but warn that
-        # the raw float info is lost. Save as uint16 PNG for max dynamic range.
-        f16 = np.clip(frame, 0, 65535).astype(np.uint16, copy=False)
+        f16 = np.clip(np.rint(frame), 0, 65535).astype(np.uint16, copy=False)
         f16 = np.ascontiguousarray(f16)
         img = Image.fromarray(f16, mode="I;16")
         metadata = PngImagePlugin.PngInfo()

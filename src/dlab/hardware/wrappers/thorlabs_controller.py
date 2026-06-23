@@ -1,6 +1,14 @@
 from __future__ import annotations
+
+import os
+from pathlib import Path
 from typing import Optional
-import thorlabs_apt as apt
+
+_APT_DLL_DIR = Path(__file__).resolve().parent.parent / "drivers" / "thorlabs_driver"
+os.add_dll_directory(str(_APT_DLL_DIR))
+os.environ["PATH"] = str(_APT_DLL_DIR) + os.pathsep + os.environ["PATH"]
+
+import thorlabs_apt as apt  # noqa: E402
 
 
 class ThorlabsNotActivatedError(RuntimeError):

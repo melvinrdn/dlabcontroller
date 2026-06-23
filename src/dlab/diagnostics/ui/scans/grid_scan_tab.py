@@ -98,7 +98,12 @@ def _reg_key_maxvalue(wp_index: int) -> str:
 
 
 def _save_png_with_meta(folder: Path, filename: str, frame_u16: np.ndarray, meta: dict) -> Path:
-    """Save a 16-bit PNG image with metadata."""
+    """Save a 16-bit PNG image with metadata. Requires uint16 input."""
+    if frame_u16.dtype != np.uint16:
+        raise TypeError(
+            f"_save_png_with_meta requires uint16, got {frame_u16.dtype}. "
+            "Cast explicitly before calling."
+        )
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / filename
     img = Image.fromarray(frame_u16, mode="I;16")
@@ -110,11 +115,15 @@ def _save_png_with_meta(folder: Path, filename: str, frame_u16: np.ndarray, meta
 
 
 def _save_png_with_meta_8bit(folder: Path, filename: str, frame_u8: np.ndarray, meta: dict) -> Path:
-    """Save an 8-bit grayscale PNG image with metadata."""
+    """Save an 8-bit grayscale PNG image with metadata. Requires uint8 input."""
+    if frame_u8.dtype != np.uint8:
+        raise TypeError(
+            f"_save_png_with_meta_8bit requires uint8, got {frame_u8.dtype}. "
+            "Cast explicitly before calling."
+        )
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / filename
-    f8 = np.asarray(frame_u8, dtype=np.uint8, copy=False)
-    img = Image.fromarray(f8, mode="L")
+    img = Image.fromarray(frame_u8, mode="L")
     pnginfo = PngImagePlugin.PngInfo()
     for k, v in meta.items():
         pnginfo.add_text(str(k), str(v))
@@ -305,7 +314,8 @@ class GridScanWorker(QObject):
     # -------------------------------------------------------------------------
 
     def _save_image(
-        self, det_key: str, dev, frame: np.ndarray, exposure_us: int, tag: str, is_8bit: bool = False,meta: dict | None = None
+        self, det_key: str, dev, frame: np.ndarray, exposure_us: int, tag: str,
+        is_8bit: bool = False, meta: dict | None = None,
     ) -> str:
         """Save an image and return the filename."""
         det_name = _detector_display_name(det_key, dev, meta)
@@ -313,11 +323,21 @@ class GridScanWorker(QObject):
         ts_ms = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         fn = f"{det_name}_{tag}_{ts_ms}.png"
 
-        meta = {"Exposure_us": exposure_us, "Gain": "", "Comment": self.comment}
+        # Merge incoming meta from grab_frame_for_scan (DarkSubtracted, ROI_px,
+        # CameraName, etc.) with scan-level fields. Local fields take precedence.
+        file_meta = dict(meta) if meta else {}
+        file_meta.update({
+            "Exposure_us": exposure_us,
+            "Gain": file_meta.get("Gain", ""),
+            "Comment": self.comment,
+        })
+
         if is_8bit:
-            _save_png_with_meta_8bit(det_day, fn, frame, meta)
+            frame_out = np.clip(frame, 0, 255).astype(np.uint8, copy=False)
+            _save_png_with_meta_8bit(det_day, fn, frame_out, file_meta)
         else:
-            _save_png_with_meta(det_day, fn, frame, meta)
+            frame_out = np.clip(frame, 0, 65535).astype(np.uint16, copy=False)
+            _save_png_with_meta(det_day, fn, frame_out, file_meta)
         return fn
 
     def _save_spectrum(

@@ -43,6 +43,8 @@ phase_types = [
     "Lens",
     "Zernike",
     "Binary",
+    "BinaryGrating",
+    "Tilt",
     "Vortex",
     "PhaseJumps",
     "TwoFociStochastic",
@@ -582,6 +584,68 @@ class TypeBinary(BaseTypeWidget):
         self.le_angle.setText(settings.get("angle", "0"))
 
 
+class TypeBinaryGrating(BaseTypeWidget):
+    """Binary phase grating for SLM PSF characterization."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.name = "BinaryGrating"
+
+        layout = QVBoxLayout(self)
+        group = QGroupBox("Binary Grating (PSF characterization)")
+        layout.addWidget(group)
+        grid = QGridLayout(group)
+
+        grid.addWidget(QLabel("Period Λ [SLM pixels, even]:"), 0, 0)
+        self.le_period = QLineEdit("4")
+        grid.addWidget(self.le_period, 0, 1)
+
+        grid.addWidget(QLabel(f"Phase separation Δφ [0–{bit_depth} = 2π]:"), 1, 0)
+        self.le_dphi = QLineEdit(str(bit_depth // 2))
+        grid.addWidget(self.le_dphi, 1, 1)
+
+        grid.addWidget(QLabel("Direction:"), 2, 0)
+        self.cb_direction = QComboBox()
+        self.cb_direction.addItems(["x", "y"])
+        grid.addWidget(self.cb_direction, 2, 1)
+
+    def phase(self) -> np.ndarray:
+        try:
+            period = int(float(self.le_period.text()))
+            dphi_gray = float(self.le_dphi.text())
+        except ValueError:
+            return np.zeros(slm_size)
+
+        if period < 2 or period % 2 != 0:
+            return np.zeros(slm_size)
+
+        H, W = slm_size
+        half = period // 2
+
+        if self.cb_direction.currentText() == "x":
+            binary_1d = ((np.arange(W) // half) % 2) * dphi_gray
+            grating = np.broadcast_to(binary_1d[None, :], slm_size)
+        else:
+            binary_1d = ((np.arange(H) // half) % 2) * dphi_gray
+            grating = np.broadcast_to(binary_1d[:, None], slm_size)
+
+        return np.mod(grating, bit_depth)
+
+    def save_(self) -> dict:
+        return {
+            "period": self.le_period.text(),
+            "dphi": self.le_dphi.text(),
+            "direction": self.cb_direction.currentText(),
+        }
+
+    def load_(self, s: dict) -> None:
+        self.le_period.setText(s.get("period", "4"))
+        self.le_dphi.setText(s.get("dphi", str(bit_depth // 2)))
+        idx = self.cb_direction.findText(s.get("direction", "x"))
+        if idx >= 0:
+            self.cb_direction.setCurrentIndex(idx)
+
+
 class TypePhaseJumps(BaseTypeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -658,6 +722,79 @@ class TypePhaseJumps(BaseTypeWidget):
         self.update_jump_display()
 
 
+class TypeTilt(BaseTypeWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.name = "Tilt"
+
+        layout = QVBoxLayout(self)
+        group = QGroupBox("Tilt Settings")
+        layout.addWidget(group)
+        grid = QGridLayout(group)
+
+        row = 0
+        grid.addWidget(QLabel("Wavelength λ [nm]:"), row, 0)
+        self.le_wl = QLineEdit("1030")
+        grid.addWidget(self.le_wl, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Focal length f [m]:"), row, 0)
+        self.le_f = QLineEdit("0.2")
+        grid.addWidget(self.le_f, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Lateral shift d_s [µm]:"), row, 0)
+        self.le_shift = QLineEdit("50")
+        grid.addWidget(self.le_shift, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Angle [deg]:"), row, 0)
+        self.le_angle = QLineEdit("0.0")
+        grid.addWidget(self.le_angle, row, 1)
+        row += 1
+
+    def phase(self):
+        try:
+            wl = float(self.le_wl.text()) * 1e-9
+            f = float(self.le_f.text())
+            d_s = float(self.le_shift.text()) * 1e-6
+            angle_deg = float(self.le_angle.text())
+        except:
+            return np.zeros(slm_size)
+
+        if wl <= 0 or f == 0:
+            return np.zeros(slm_size)
+
+        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
+        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
+        X, Y = np.meshgrid(x, y, indexing="xy")
+
+        ang = np.deg2rad(angle_deg)
+        U = X * np.cos(ang) + Y * np.sin(ang)
+
+        k0 = 2 * np.pi / wl
+        k_t = k0 * d_s / f
+
+        phase = k_t * U
+
+        wrapped = np.mod(phase, 2 * np.pi)
+        return wrapped * (bit_depth / (2 * np.pi))
+
+    def save_(self):
+        return {
+            "wl_nm": self.le_wl.text(),
+            "f_m": self.le_f.text(),
+            "d_s_um": self.le_shift.text(),
+            "angle_deg": self.le_angle.text(),
+        }
+
+    def load_(self, s):
+        self.le_wl.setText(s.get("wl_nm", "1030"))
+        self.le_f.setText(s.get("f_m", "0.2"))
+        self.le_shift.setText(s.get("d_s_um", "50"))
+        self.le_angle.setText(s.get("angle_deg", "0.0"))
+
+
 class TypeTwoFociStochastic(BaseTypeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -723,7 +860,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.le_n_d_b = QLineEdit("8")
         grid.addWidget(self.le_n_d_b, row, 1)
         row += 1
-        
+
         grid.addWidget(QLabel("seed:"), row, 0)
         self.le_seed = QLineEdit("123456")
         grid.addWidget(self.le_seed, row, 1)
@@ -758,15 +895,15 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         if not (0 <= alpha <= 1 and 0 <= beta_a <= 1 and 0 <= beta_b <= 1):
             return np.zeros(slm_size)
 
-        patch_size = M * pixel_size   # ℓ = M·p
+        patch_size = M * pixel_size  # ℓ = M·p
 
         x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
         y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
         X, Y = np.meshgrid(x, y, indexing="xy")
 
         ang = np.deg2rad(angle_deg)
-        U = X * np.cos(ang) + Y * np.sin(ang)        # main axis
-        V = -X * np.sin(ang) + Y * np.cos(ang)       # orthogonal axis (dump)
+        U = X * np.cos(ang) + Y * np.sin(ang)  # main axis
+        V = -X * np.sin(ang) + Y * np.cos(ang)  # orthogonal axis (dump)
 
         k0 = 2 * np.pi / wl
         k_t = k0 * d_s / (2 * f)
@@ -779,8 +916,8 @@ class TypeTwoFociStochastic(BaseTypeWidget):
 
         k_d_a = n_d_a * k_t
         k_d_b = n_d_b * k_t
-        phi_Ap = +k_d_a * V    # dump A along orthogonal axis
-        phi_Bp = -k_d_b * V    # dump B along orthogonal axis
+        phi_Ap = +k_d_a * V  # dump A along orthogonal axis
+        phi_Bp = -k_d_b * V  # dump B along orthogonal axis
 
         sa, sb = np.sqrt(1 - alpha), np.sqrt(alpha)
         xi_A_tot = 0.0 if sa + sb == 0 else sa / (sa + sb)
@@ -797,8 +934,9 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         main_A = side_is_A & (u_dump < np.sqrt(1 - beta_a))
         main_B = (~side_is_A) & (u_dump < np.sqrt(1 - beta_b))
 
-        phase = (np.where(main_A, phi_A, np.where(side_is_A, phi_Ap, 0.0))
-                 + np.where(main_B, phi_B, np.where(~side_is_A, phi_Bp, 0.0)))
+        phase = np.where(main_A, phi_A, np.where(side_is_A, phi_Ap, 0.0)) + np.where(
+            main_B, phi_B, np.where(~side_is_A, phi_Bp, 0.0)
+        )
 
         wrapped = np.mod(phase, 2 * np.pi)
         return wrapped * (bit_depth / (2 * np.pi))
@@ -837,10 +975,13 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.cb_noA.setChecked(s.get("noA", False))
         self.cb_noB.setChecked(s.get("noB", False))
 
+
 def new_type(parent, typ):
     types_dict = {
         "Flat": TypeFlat,
         "Binary": TypeBinary,
+        "BinaryGrating": TypeBinaryGrating,  # <-- nouveau
+        "Tilt": TypeTilt,
         "Lens": TypeLens,
         "Vortex": TypeVortex,
         "Zernike": TypeZernike,
