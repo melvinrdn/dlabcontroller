@@ -48,6 +48,7 @@ phase_types = [
     "Vortex",
     "PhaseJumps",
     "TwoFociStochastic",
+    "FourFociStochastic",
 ]
 
 
@@ -975,18 +976,134 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.cb_noA.setChecked(s.get("noA", False))
         self.cb_noB.setChecked(s.get("noB", False))
 
+class TypeFourFociStochastic(BaseTypeWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.name = "FourFociStochastic"
+
+        layout = QVBoxLayout(self)
+        group = QGroupBox("Four Foci Stochastic Settings")
+        layout.addWidget(group)
+        grid = QGridLayout(group)
+
+        row = 0
+        grid.addWidget(QLabel("Wavelength λ [nm]:"), row, 0)
+        self.le_wl = QLineEdit("1030")
+        grid.addWidget(self.le_wl, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Focal length f [m]:"), row, 0)
+        self.le_f = QLineEdit("0.2")
+        grid.addWidget(self.le_f, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Focus separation d_s [µm]:"), row, 0)
+        self.le_sep = QLineEdit("50")
+        grid.addWidget(self.le_sep, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("π-shifted spot index (0-3):"), row, 0)
+        self.le_pi_spot = QLineEdit("3")
+        grid.addWidget(self.le_pi_spot, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Pixels per patch M:"), row, 0)
+        self.le_M = QLineEdit("16")
+        grid.addWidget(self.le_M, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Angle [deg]:"), row, 0)
+        self.le_angle = QLineEdit("0.0")
+        grid.addWidget(self.le_angle, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("seed:"), row, 0)
+        self.le_seed = QLineEdit("123456")
+        grid.addWidget(self.le_seed, row, 1)
+        row += 1
+
+    def phase(self):
+        try:
+            wl = float(self.le_wl.text()) * 1e-9
+            f = float(self.le_f.text())
+            d_s = float(self.le_sep.text()) * 1e-6
+            pi_spot = int(float(self.le_pi_spot.text()))
+            M = int(float(self.le_M.text()))
+            angle_deg = float(self.le_angle.text())
+            seed = float(self.le_seed.text())
+        except:
+            return np.zeros(slm_size)
+
+        if wl <= 0 or f == 0 or M < 1:
+            return np.zeros(slm_size)
+        if not (0 <= pi_spot <= 3):
+            return np.zeros(slm_size)
+
+        patch_size = M * pixel_size  # ℓ = M·p
+
+        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
+        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
+        X, Y = np.meshgrid(x, y, indexing="xy")
+
+        k0 = 2 * np.pi / wl
+        k_t = k0 * d_s / (2 * f)
+
+        # four corner deflections, rotated rigidly by `angle`
+        ang = np.deg2rad(angle_deg)
+        ca, sa = np.cos(ang), np.sin(ang)
+        base = [(+1, +1), (+1, -1), (-1, +1), (-1, -1)]
+        signs = [(sx * ca - sy * sa, sx * sa + sy * ca) for sx, sy in base]
+
+        ramps = [dx * k_t * X + dy * k_t * Y for dx, dy in signs]
+        ramps[pi_spot] = ramps[pi_spot] + np.pi
+
+        ix = np.floor((X - X.min()) / patch_size).astype(np.int64)
+        iy = np.floor((Y - Y.min()) / patch_size).astype(np.int64)
+        pid = iy * (ix.max() + 1) + ix
+        uniq, inv = np.unique(pid, return_inverse=True)
+
+        rng = np.random.default_rng(int(seed))
+        channel = rng.integers(0, 4, size=uniq.size)[inv]  # equal 1/4 split
+
+        phase = np.zeros_like(X, float)
+        for c in range(4):
+            phase = np.where(channel == c, ramps[c], phase)
+
+        wrapped = np.mod(phase, 2 * np.pi)
+        return wrapped * (bit_depth / (2 * np.pi))
+
+    def save_(self):
+        return {
+            "wl_nm": self.le_wl.text(),
+            "f_m": self.le_f.text(),
+            "d_s_um": self.le_sep.text(),
+            "pi_spot": self.le_pi_spot.text(),
+            "M": self.le_M.text(),
+            "angle_deg": self.le_angle.text(),
+            "seed": self.le_seed.text(),
+        }
+
+    def load_(self, s):
+        self.le_wl.setText(s.get("wl_nm", "1030"))
+        self.le_f.setText(s.get("f_m", "0.2"))
+        self.le_sep.setText(s.get("d_s_um", "50"))
+        self.le_pi_spot.setText(s.get("pi_spot", "3"))
+        self.le_M.setText(s.get("M", "16"))
+        self.le_angle.setText(s.get("angle_deg", "0.0"))
+        self.le_seed.setText(s.get("seed", "123456"))
 
 def new_type(parent, typ):
     types_dict = {
         "Flat": TypeFlat,
         "Binary": TypeBinary,
-        "BinaryGrating": TypeBinaryGrating,  # <-- nouveau
+        "BinaryGrating": TypeBinaryGrating,
         "Tilt": TypeTilt,
         "Lens": TypeLens,
         "Vortex": TypeVortex,
         "Zernike": TypeZernike,
         "PhaseJumps": TypePhaseJumps,
         "TwoFociStochastic": TypeTwoFociStochastic,
+        "FourFociStochastic": TypeFourFociStochastic,
     }
     if typ not in types_dict:
         raise ValueError(
