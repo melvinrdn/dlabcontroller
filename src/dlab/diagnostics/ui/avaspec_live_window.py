@@ -48,17 +48,17 @@ class AvaspecPreset:
 
 _PRESETS: dict[str, AvaspecPreset] = {
     "w": AvaspecPreset(
-        label="ω",
+        label="\u03c9",
         registry_prefix="spectrometer:avaspec:w",
         ui_registry_key="ui:avaspec_live:w",
     ),
     "2w": AvaspecPreset(
-        label="ω/2ω",
+        label="\u03c9/2\u03c9",
         registry_prefix="spectrometer:avaspec:2w",
         ui_registry_key="ui:avaspec_live:2w",
     ),
     "3w": AvaspecPreset(
-        label="ω/3ω",
+        label="\u03c9/3\u03c9",
         registry_prefix="spectrometer:avaspec:3w",
         ui_registry_key="ui:avaspec_live:3w",
     ),
@@ -148,7 +148,7 @@ class AvaspecLiveWindow(QWidget):
         self._preset = preset or _PRESETS[instance_id]
         self._instance_id = instance_id
 
-        self.setWindowTitle(f"Avaspec Live — {self._preset.label}")
+        self.setWindowTitle(f"Avaspec Live \u2014 {self._preset.label}")
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         self._log = log_panel
@@ -159,10 +159,16 @@ class AvaspecLiveWindow(QWidget):
 
         # Plot state
         self._line = None
-        self._fft_scatter = None
         self._fft_line = None
         self._fft_peak_vline = None
-        self._fft_colorbar = None
+
+        # Blitting state (single background for the whole figure)
+        self._bg = None
+        self._blit_ready = False
+        self._last_xlim = None
+        self._last_ylim = None
+        self._last_fft_xlim = None
+        self._last_fft_ylim = None
 
         # Data state
         self._last_wl: np.ndarray | None = None
@@ -175,13 +181,12 @@ class AvaspecLiveWindow(QWidget):
 
         # FFT state
         self._fft_indices: np.ndarray | None = None
-        self._fft_phase: np.ndarray | None = None
         self._fft_peak_idx = 300  # Default index
 
         self._mpl_cid_click = None
 
         self._init_ui()
-        self.resize(1400, 780)
+        self.resize(1050, 620)
 
         try:
             REGISTRY.register(self._preset.ui_registry_key, self)
@@ -220,7 +225,7 @@ class AvaspecLiveWindow(QWidget):
         row.addWidget(self._avg_edit)
         row.addWidget(btn_apply)
 
-        self._lbl_ftl = QLabel("FTL: — fs")
+        self._lbl_ftl = QLabel("FTL: \u2014 fs")
         self._lbl_ftl.setMinimumWidth(140)
         self._lbl_ftl.setAlignment(Qt.AlignCenter)
         self._lbl_ftl.setStyleSheet("QLabel { border: 1px solid #888; padding: 4px; }")
@@ -243,75 +248,66 @@ class AvaspecLiveWindow(QWidget):
         row2.addStretch(1)
         root.addLayout(row2)
 
-        # Spectrum zoom + FFT toggle
+        # Spectrum zoom + left Y limit
         row_vis = QHBoxLayout()
-        self._chk_zoom = QCheckBox("Zoom @ λ₀")
+        self._chk_zoom = QCheckBox("Zoom @ \u03bb\u2080")
         self._chk_zoom.setChecked(True)
         self._cwl_edit = QLineEdit("515")
-        self._cwl_edit.setPlaceholderText("λ₀ (nm)")
-        self._cwl_edit.setFixedWidth(80)
+        self._cwl_edit.setPlaceholderText("\u03bb\u2080 (nm)")
+        self._cwl_edit.setFixedWidth(70)
         self._zoom_pm_edit = QLineEdit("20")
-        self._zoom_pm_edit.setFixedWidth(60)
+        self._zoom_pm_edit.setFixedWidth(50)
         row_vis.addWidget(self._chk_zoom)
-        row_vis.addWidget(QLabel("λ₀ (nm):"))
+        row_vis.addWidget(QLabel("\u03bb\u2080:"))
         row_vis.addWidget(self._cwl_edit)
-        row_vis.addWidget(QLabel("± (nm):"))
+        row_vis.addWidget(QLabel("\u00b1:"))
         row_vis.addWidget(self._zoom_pm_edit)
-        row_vis.addSpacing(20)
 
-        self._chk_fft = QCheckBox("Show FFT")
-        self._chk_fft.setChecked(True)
-        self._chk_fft.stateChanged.connect(self._on_fft_toggle)
-        row_vis.addWidget(self._chk_fft)
-        row_vis.addSpacing(20)
+        row_vis.addSpacing(15)
+        row_vis.addWidget(QLabel("Counts y:"))
+        self._ax_ymin_edit = QLineEdit("0")
+        self._ax_ymin_edit.setFixedWidth(60)
+        row_vis.addWidget(self._ax_ymin_edit)
+        self._ax_ymax_edit = QLineEdit("60000")
+        self._ax_ymax_edit.setFixedWidth(70)
+        row_vis.addWidget(self._ax_ymax_edit)
 
-        self._chk_phase_color = QCheckBox("Display phase in FT")
-        self._chk_phase_color.setChecked(True)
-        row_vis.addWidget(self._chk_phase_color)
+        btn_ax_ylim = QPushButton("Set")
+        btn_ax_ylim.clicked.connect(self._on_update_left_ylim)
+        row_vis.addWidget(btn_ax_ylim)
+
         row_vis.addStretch(1)
         root.addLayout(row_vis)
 
-        # FFT-specific controls
+        # FFT-specific controls (compact: direct x/y limits, no phase/centering)
         row_fft = QHBoxLayout()
 
-        self._chk_fft_zoom = QCheckBox("Zoom FFT @ index")
-        self._chk_fft_zoom.setChecked(True)
-        self._fft_idx_edit = QLineEdit("300")
-        self._fft_idx_edit.setPlaceholderText("center")
-        self._fft_idx_edit.setFixedWidth(80)
-        self._fft_window_edit = QLineEdit("150")
-        self._fft_window_edit.setFixedWidth(60)
-        row_fft.addWidget(self._chk_fft_zoom)
-        row_fft.addWidget(QLabel("Center:"))
-        row_fft.addWidget(self._fft_idx_edit)
-        row_fft.addWidget(QLabel("Window:"))
-        row_fft.addWidget(self._fft_window_edit)
+        row_fft.addWidget(QLabel("FFT x:"))
+        self._fft_xmin_edit = QLineEdit("0")
+        self._fft_xmin_edit.setFixedWidth(60)
+        row_fft.addWidget(self._fft_xmin_edit)
+        self._fft_xmax_edit = QLineEdit("500")
+        self._fft_xmax_edit.setFixedWidth(60)
+        row_fft.addWidget(self._fft_xmax_edit)
 
-        row_fft.addSpacing(20)
-        self._fft_peak_edit = QLineEdit("300")
-        self._fft_peak_edit.setPlaceholderText("index")
-        self._fft_peak_edit.setFixedWidth(90)
-        btn_set_peak = QPushButton("Set Index")
-        btn_set_peak.clicked.connect(self._on_set_peak_idx)
-        row_fft.addWidget(QLabel("Mark:"))
-        row_fft.addWidget(self._fft_peak_edit)
-        row_fft.addWidget(btn_set_peak)
+        row_fft.addSpacing(15)
+        row_fft.addWidget(QLabel("FFT y:"))
+        self._ylim_min_edit = QLineEdit("0")
+        self._ylim_min_edit.setFixedWidth(60)
+        row_fft.addWidget(self._ylim_min_edit)
+        self._ylim_max_edit = QLineEdit("2e5")
+        self._ylim_max_edit.setFixedWidth(60)
+        row_fft.addWidget(self._ylim_max_edit)
 
-        row_fft.addSpacing(20)
-        self._downsample_edit = QLineEdit("1")
-        self._downsample_edit.setFixedWidth(60)
-        row_fft.addWidget(QLabel("Point skip:"))
+        row_fft.addSpacing(15)
+        row_fft.addWidget(QLabel("Skip:"))
+        self._downsample_edit = QLineEdit("5")
+        self._downsample_edit.setFixedWidth(50)
         row_fft.addWidget(self._downsample_edit)
 
-        row_fft.addSpacing(20)
-        self._ylim_min_edit = QLineEdit("0")
-        self._ylim_min_edit.setFixedWidth(80)
-        self._ylim_max_edit = QLineEdit("2e5")
-        self._ylim_max_edit.setFixedWidth(80)
-        row_fft.addWidget(QLabel("FFT y-lim:"))
-        row_fft.addWidget(self._ylim_min_edit)
-        row_fft.addWidget(QLabel(".."))
-        row_fft.addWidget(self._ylim_max_edit)
+        btn_fft_lim = QPushButton("Set FFT lim")
+        btn_fft_lim.clicked.connect(self._on_update_fft_lim)
+        row_fft.addWidget(btn_fft_lim)
 
         row_fft.addStretch(1)
         root.addLayout(row_fft)
@@ -343,23 +339,25 @@ class AvaspecLiveWindow(QWidget):
 
         # Figure with 2 panels
         self._figure, (self._ax, self._ax_fft) = plt.subplots(
-            1, 2, gridspec_kw={"width_ratios": [2, 1]}
+            1, 2, gridspec_kw={"width_ratios": [2, 1]}, figsize=(9, 3.2)
         )
 
         self._ax.set_xlabel("Wavelength (nm)")
         self._ax.set_ylabel("Counts")
         self._ax.grid(True)
+        self._apply_left_ylim()
 
         self._ax_fft.set_xlabel("Index")
-        self._ax_fft.set_ylabel("|FFT|")
         self._ax_fft.grid(True)
-        self._ax_fft.set_visible(True)
 
         self._canvas = FigureCanvas(self._figure)
         self._canvas.setSizePolicy(
             self._canvas.sizePolicy().Expanding, self._canvas.sizePolicy().Expanding
         )
         root.addWidget(self._canvas, 10)
+
+        # A canvas resize invalidates any captured background.
+        self._canvas.mpl_connect("resize_event", lambda _e: self._invalidate_blit())
 
         # Click handler for picking index from FFT
         self._mpl_cid_click = self._canvas.mpl_connect(
@@ -477,6 +475,7 @@ class AvaspecLiveWindow(QWidget):
 
         self._ref_wl = None
         self._last_draw = 0.0
+        self._invalidate_blit()
 
         self._capture_thread = _MeasureThread(self._ctrl, it, av)
         self._capture_thread.data_ready.connect(self._on_data, Qt.QueuedConnection)
@@ -529,6 +528,55 @@ class AvaspecLiveWindow(QWidget):
         self._stop_live()
 
     # -------------------------------------------------------------------------
+    # Blitting helpers
+    # -------------------------------------------------------------------------
+
+    def _invalidate_blit(self) -> None:
+        """Force a full redraw + background recapture on the next frame."""
+        self._blit_ready = False
+
+    def _limits_changed(self) -> bool:
+        """Return True if any axis limit differs from the last captured state."""
+        xlim = self._ax.get_xlim()
+        ylim = self._ax.get_ylim()
+        fxlim = self._ax_fft.get_xlim()
+        fylim = self._ax_fft.get_ylim()
+        changed = (
+            xlim != self._last_xlim
+            or ylim != self._last_ylim
+            or fxlim != self._last_fft_xlim
+            or fylim != self._last_fft_ylim
+        )
+        self._last_xlim = xlim
+        self._last_ylim = ylim
+        self._last_fft_xlim = fxlim
+        self._last_fft_ylim = fylim
+        return changed
+
+    def _recapture_background(self) -> None:
+        """Full draw of the static scene, then grab the pixel buffer.
+
+        Both animated lines are hidden during the draw so they are NOT baked
+        into the background; they get blitted on top afterwards.
+        """
+        line_vis = self._line.get_visible() if self._line is not None else None
+        fft_vis = self._fft_line.get_visible() if self._fft_line is not None else None
+        if self._line is not None:
+            self._line.set_visible(False)
+        if self._fft_line is not None:
+            self._fft_line.set_visible(False)
+
+        self._canvas.draw()
+        self._bg = self._canvas.copy_from_bbox(self._figure.bbox)
+
+        if self._line is not None and line_vis is not None:
+            self._line.set_visible(line_vis)
+        if self._fft_line is not None and fft_vis is not None:
+            self._fft_line.set_visible(fft_vis)
+
+        self._blit_ready = True
+
+    # -------------------------------------------------------------------------
     # Data handling
     # -------------------------------------------------------------------------
 
@@ -557,28 +605,43 @@ class AvaspecLiveWindow(QWidget):
         ftl_s, _, _ = self._compute_ftl_from_spectrum(wl, disp, level=0.5)
         ftl_fs = ftl_s * 1e15 if np.isfinite(ftl_s) else float("nan")
         self._lbl_ftl.setText(
-            f"FTL: {ftl_fs:.0f} fs" if np.isfinite(ftl_fs) else "FTL: — fs"
+            f"FTL: {ftl_fs:.0f} fs" if np.isfinite(ftl_fs) else "FTL: \u2014 fs"
         )
 
+        # --- Left panel: spectrum line -------------------------------------
         if self._line is None:
-            self._ax.cla()
-            self._ax.set_xlabel("Wavelength (nm)")
-            self._ax.set_ylabel("Counts")
-            self._ax.grid(True)
-            (self._line,) = self._ax.plot(wl, y, lw=1.2)
+            (self._line,) = self._ax.plot(wl, y, lw=1.8, animated=True)
             self._ax.set_xlim(self._ref_wl[0], self._ref_wl[-1])
+            self._apply_left_ylim()
+            self._invalidate_blit()
         else:
-            self._line.set_xdata(wl)
-            self._line.set_ydata(y)
+            self._line.set_data(wl, y)
 
-        self._ax.relim()
-        self._ax.autoscale(enable=True, axis="y", tight=False)
-        self._ax.autoscale_view(scalex=False, scaley=True)
+        # Fixed Y limit (user-controlled), then apply the wavelength zoom.
         self._apply_zoom_window(wl)
 
+        # --- Right panel: FFT amplitude line -------------------------------
         self._update_fft(wl, y)
 
-        self._canvas.draw_idle()
+        # --- Blit both panels ----------------------------------------------
+        # If any limit moved (zoom, user change), the cached background is
+        # stale: recapture it. Otherwise just restore + redraw the animated
+        # lines. With a fixed left-Y limit, recapture only happens on zoom /
+        # limit changes, so steady-state runs pure blit.
+        if not self._blit_ready or self._limits_changed():
+            self._recapture_background()
+
+        self._canvas.restore_region(self._bg)
+        if self._line is not None and self._line.get_visible():
+            self._ax.draw_artist(self._line)
+        if self._fft_line is not None and self._fft_line.get_visible():
+            self._ax_fft.draw_artist(self._fft_line)
+            if (
+                self._fft_peak_vline is not None
+                and self._fft_peak_vline.get_visible()
+            ):
+                self._ax_fft.draw_artist(self._fft_peak_vline)
+        self._canvas.blit(self._figure.bbox)
 
     def _get_threshold_fraction(self) -> float:
         try:
@@ -598,6 +661,22 @@ class AvaspecLiveWindow(QWidget):
             return np.zeros_like(y_pos)
         cutoff = thr * ymax
         return np.where(y_pos >= cutoff, y_pos, 0.0)
+
+    def _apply_left_ylim(self) -> None:
+        """Apply the user-set fixed Y limits to the counts (left) axis."""
+        try:
+            ymin = float(self._ax_ymin_edit.text())
+            ymax = float(self._ax_ymax_edit.text())
+            if ymin < ymax:
+                self._ax.set_ylim(ymin, ymax)
+        except Exception:
+            pass
+
+    def _on_update_left_ylim(self) -> None:
+        """User-triggered left-Y limit update: invalidate the blit background."""
+        self._apply_left_ylim()
+        self._invalidate_blit()
+        self._canvas.draw_idle()
 
     def _apply_zoom_window(self, wl: np.ndarray):
         if not self._chk_zoom.isChecked():
@@ -634,15 +713,8 @@ class AvaspecLiveWindow(QWidget):
     # FFT
     # -------------------------------------------------------------------------
 
-    def _on_fft_toggle(self, state):
-        show = state == Qt.Checked
-        self._ax_fft.set_visible(show)
-        self._canvas.draw_idle()
-
     def _on_canvas_click(self, event):
         if event.button != 1 or event.inaxes is not self._ax_fft:
-            return
-        if not self._chk_fft.isChecked():
             return
         if self._fft_indices is None or self._fft_indices.size == 0:
             return
@@ -655,183 +727,67 @@ class AvaspecLiveWindow(QWidget):
             return
         self._set_peak_idx_internal(idx)
 
-    def _on_set_peak_idx(self):
-        try:
-            idx = int(self._fft_peak_edit.text())
-        except Exception:
-            self._log_message("Invalid index value.")
-            return
-
-        if self._fft_indices is None or idx < 0 or idx >= self._fft_indices.size:
-            self._log_message("Index out of range.")
-            return
-
-        self._set_peak_idx_internal(idx)
-
     def _set_peak_idx_internal(self, idx: int):
         self._fft_peak_idx = idx
-        self._fft_peak_edit.setText(f"{idx}")
 
         if self._fft_peak_vline is None:
             self._fft_peak_vline = self._ax_fft.axvline(
-                idx, color="r", linestyle="--", linewidth=2.0, alpha=0.8
+                idx, color="r", linestyle="--", linewidth=2.0, alpha=0.8,
+                animated=True,
             )
         else:
             self._fft_peak_vline.set_xdata([idx, idx])
 
         self._log_message(f"Marked index {idx}")
+
+    def _apply_fft_limits(self) -> None:
+        """Apply direct x/y limits from the edit fields to the FFT axis."""
+        try:
+            xmin = float(self._fft_xmin_edit.text())
+            xmax = float(self._fft_xmax_edit.text())
+            if xmin < xmax:
+                self._ax_fft.set_xlim(xmin, xmax)
+        except Exception:
+            pass
+        try:
+            ymin = float(self._ylim_min_edit.text())
+            ymax = float(self._ylim_max_edit.text())
+            if ymin < ymax:
+                self._ax_fft.set_ylim(ymin, ymax)
+        except Exception:
+            pass
+
+    def _on_update_fft_lim(self) -> None:
+        """User-triggered FFT limit update: invalidate the blit background."""
+        self._apply_fft_limits()
+        self._invalidate_blit()
         self._canvas.draw_idle()
 
-    def _apply_fft_zoom_by_index(self, indices: np.ndarray):
-        if not self._chk_fft_zoom.isChecked():
-            return
-
-        try:
-            center_idx = int(self._fft_idx_edit.text())
-            window = int(self._fft_window_edit.text())
-        except Exception:
-            return
-
-        if window <= 0:
-            return
-
-        indices = np.asarray(indices, int).ravel()
-        N = indices.size
-        if N < 2:
-            return
-
-        idx_min = max(0, center_idx - window // 2)
-        idx_max = min(N - 1, center_idx + window // 2)
-
-        if idx_max <= idx_min:
-            return
-
-        self._ax_fft.set_xlim(idx_min, idx_max)
-
-    def _update_fft(self, wl: np.ndarray, y: np.ndarray):
-        if not self._chk_fft.isChecked():
-            return
-
+    def _update_fft(self, wl: np.ndarray, y: np.ndarray) -> None:
+        """Update the FFT amplitude line (data only; drawing is done via blit)."""
         wl = np.asarray(wl, float).ravel()
         y = np.asarray(y, float).ravel()
         if wl.size < 4 or y.size != wl.size:
             return
 
-        dlam = np.mean(np.diff(wl))
-        if not np.isfinite(dlam) or dlam == 0:
-            return
-
-        N = wl.size
-        Y = np.fft.rfft(y)
-        mag = np.abs(Y)
-        phase = np.angle(Y)
-
-        indices = np.arange(len(mag))
+        mag = np.abs(np.fft.rfft(y))
+        indices = np.arange(mag.size)
         self._fft_indices = indices
-        self._fft_phase = phase
 
-        # Get downsampling factor
         try:
             skip = max(1, int(self._downsample_edit.text()))
         except Exception:
             skip = 1
 
-        self._ax_fft.set_visible(True)
+        x = indices[::skip]
+        mag_plot = mag[::skip]
 
-        show_phase_color = self._chk_phase_color.isChecked()
-
-        if show_phase_color:
-            if self._fft_line is not None:
-                self._fft_line.remove()
-                self._fft_line = None
-
-            # Get index range for zoom if applicable
-            if self._chk_fft_zoom.isChecked():
-                try:
-                    center_idx = int(self._fft_idx_edit.text())
-                    window = int(self._fft_window_edit.text())
-                    idx_min = max(0, center_idx - window // 2)
-                    idx_max = min(len(indices) - 1, center_idx + window // 2)
-                    idx_plot = indices[idx_min : idx_max + 1 : skip]
-                    mag_plot = mag[idx_min : idx_max + 1 : skip]
-                    phase_plot = phase[idx_min : idx_max + 1 : skip]
-                except Exception:
-                    idx_plot = indices[::skip]
-                    mag_plot = mag[::skip]
-                    phase_plot = phase[::skip]
-            else:
-                idx_plot = indices[::skip]
-                mag_plot = mag[::skip]
-                phase_plot = phase[::skip]
-
-            if self._fft_scatter is not None:
-                self._fft_scatter.remove()
-
-            self._ax_fft.cla()
-            self._ax_fft.set_xlabel("Index")
-            self._ax_fft.set_ylabel("|FFT|")
-            self._ax_fft.grid(True)
-
-            self._fft_scatter = self._ax_fft.scatter(
-                idx_plot,
-                mag_plot,
-                c=phase_plot,
-                cmap="hsv",
-                s=20,
-                vmin=-np.pi,
-                vmax=np.pi,
-            )
-
-            if self._fft_colorbar is None:
-                self._fft_colorbar = self._figure.colorbar(
-                    self._fft_scatter, ax=self._ax_fft, label="Phase (rad)"
-                )
+        if self._fft_line is None:
+            (self._fft_line,) = self._ax_fft.plot(x, mag_plot, lw=1.8, animated=True)
+            self._apply_fft_limits()
+            self._invalidate_blit()
         else:
-            if self._fft_scatter is not None:
-                self._fft_scatter.remove()
-                self._fft_scatter = None
-            if self._fft_colorbar is not None:
-                self._fft_colorbar.remove()
-                self._fft_colorbar = None
-
-            idx_plot = indices[::skip]
-            mag_plot = mag[::skip]
-
-            if self._fft_line is None:
-                self._ax_fft.cla()
-                self._ax_fft.set_xlabel("Index")
-                self._ax_fft.set_ylabel("|FFT|")
-                self._ax_fft.grid(True)
-                (self._fft_line,) = self._ax_fft.plot(idx_plot, mag_plot, lw=1.0)
-            else:
-                self._fft_line.set_xdata(idx_plot)
-                self._fft_line.set_ydata(mag_plot)
-
-        if not show_phase_color:
-            self._apply_fft_zoom_by_index(indices)
-
-        # Apply manual y-limits on FFT amplitude
-        ymin = ymax = None
-        try:
-            if self._ylim_min_edit.text().strip():
-                ymin = float(self._ylim_min_edit.text())
-            if self._ylim_max_edit.text().strip():
-                ymax = float(self._ylim_max_edit.text())
-        except Exception:
-            ymin = ymax = None
-
-        if ymin is not None and ymax is not None and ymin < ymax:
-            self._ax_fft.set_ylim(ymin, ymax)
-        elif not show_phase_color:
-            self._ax_fft.relim()
-            self._ax_fft.autoscale_view()
-
-        # Update marker position if set
-        if self._fft_peak_vline is not None and self._fft_peak_idx is not None:
-            if 0 <= self._fft_peak_idx < len(indices):
-                self._fft_peak_vline.set_xdata([self._fft_peak_idx, self._fft_peak_idx])
-            else:
-                self._fft_peak_vline = None
+            self._fft_line.set_data(x, mag_plot)
 
     # -------------------------------------------------------------------------
     # FTL computation
