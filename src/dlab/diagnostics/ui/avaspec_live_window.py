@@ -215,7 +215,7 @@ class AvaspecLiveWindow(QWidget):
 
         # Acquisition params
         row = QHBoxLayout()
-        self._int_edit = QLineEdit("100")
+        self._int_edit = QLineEdit("50")
         self._avg_edit = QLineEdit("1")
         btn_apply = QPushButton("Apply")
         btn_apply.clicked.connect(self._apply_params)

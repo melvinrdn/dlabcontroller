@@ -1,103 +1,23 @@
-# ------------------
-# Path config
-#-------------------
-paths:
-  drivers_andor: src/dlab/hardware/drivers/andor_driver
-  drivers_avaspec: src/dlab/hardware/drivers/avaspec_driver
-  drivers_slm: src/dlab/hardware/drivers/SLM_driver
-  ressources_dir: ressources
-  logs_dir: logs
-  data_dir: C:/data
-
-# ------------------
-# SLM config
-#-------------------
-slm:
-  beam_radius_on_slm: 0.0035
-  defaults_file: ressources/saved_settings/slm_defaults.yaml
-  red_default: ressources/saved_settings/SLM_red/red_default_settings.txt
-  green_default: ressources/saved_settings/SLM_green/green_default_settings.txt
-  red_saved_dir: ressources/saved_settings/SLM_red
-  green_saved_dir: ressources/saved_settings/SLM_green
-
-# ------------------
-# Pressure sensors config
-#-------------------
-pressure_sensor:
-  port: COM3
-  pressure_update_interval_s: 5.0
-  prometheus_port: 8000
-  grafana_url: http://localhost:3000
-
-# ------------------
-# Thorlabs wavelplates config
-#-------------------
-waveplates:
-  num_waveplates: 7
-  calibration_files:
-    "1": calibration/wp1/default_wp1.txt
-    "2": calibration/wp2/default_wp2.txt
-    "3": calibration/wp3/default_wp3.txt
-    "4": calibration/wp4/default_wp4.txt
-    "5": calibration/wp5/default_wp5.txt
-    "6": calibration/wp6/default_wp6.txt
-
-# ------------------
-# Thorlabs stages config
-#-------------------
-stages:
-  default_ids:
-    0: "00000000"
-    1: "83837719"
-    2: "83838295"
-    3: "00000000"
-    4: "00000000"
-    5: "00000000"
-    6: "00000000"
-    7: "00000000"
-    8: "83837725"
-
-# ------------------
-# Avaspec spectrometer config
-#-------------------
-avaspec:
-  calibration_file_1030nm: ressources/calibration/avaspec/avaspec_calibration_1030nm.dat
-
-# ------------------
-# Zaber stage config
-#-------------------
-zaber:
-  port: COM4
-  baud: 9600
-  range:
-    min: 24.0
-    max: 25.3
-
-# ------------------
-# Daheng camera config
-#-------------------  
-crosshair:
-  daheng_1:
-    x_mm: 1.6275182077026016
-    y_mm: 2.3923050053781667
-  daheng_2:
-    x_mm: 1.6905223783149792
-    y_mm: 0.8784059103674804
-
-# ------------------
-# Andor camera config
-#-------------------  
 andor:
   crosshair:
     x: 114.56372885154052
     y: 144.92521008403355
   preprocess:
-    enabled: true
     angle: -97.0
-    x0: 150
+    enabled: true
+    x0: 165
     x1: 520
-    y0: 220
-    y1: 310
+    y0: 180
+    y1: 330
+avaspec:
+  calibration_file_1030nm: ressources/calibration/avaspec/avaspec_calibration_1030nm.dat
+crosshair:
+  daheng_1:
+    x_mm: 3.5009004989217694
+    y_mm: 1.6799160847895271
+  daheng_2:
+    x_mm: 1.6905223783149792
+    y_mm: 0.8784059103674804
 crosshair2:
   daheng_1:
     x_mm: 3.613642122187133
@@ -105,12 +25,53 @@ crosshair2:
   daheng_2:
     x_mm: 3.4435419659828534
     y_mm: 1.8551511429061915
-
-# ------------------
-# Piezojena config
-#-------------------  
+paths:
+  data_dir: C:/data
+  drivers_andor: src/dlab/hardware/drivers/andor_driver
+  drivers_avaspec: src/dlab/hardware/drivers/avaspec_driver
+  drivers_slm: src/dlab/hardware/drivers/SLM_driver
+  logs_dir: logs
+  ressources_dir: ressources
 piezojena:
   nv40_2w:
     port: COM6
   nv40_3w:
     port: COMX
+pressure_sensor:
+  grafana_url: http://localhost:3000
+  port: COM3
+  pressure_update_interval_s: 5.0
+  prometheus_port: 8000
+slm:
+  beam_radius_on_slm: 0.0035
+  defaults_file: ressources/saved_settings/slm_defaults.yaml
+  green_default: ressources/saved_settings/SLM_green/green_default_settings.txt
+  green_saved_dir: ressources/saved_settings/SLM_green
+  red_default: ressources/saved_settings/SLM_red/red_default_settings.txt
+  red_saved_dir: ressources/saved_settings/SLM_red
+stages:
+  default_ids:
+    0: '00000000'
+    1: '83837719'
+    2: '83838295'
+    3: '00000000'
+    4: '00000000'
+    5: '00000000'
+    6: '00000000'
+    7: '00000000'
+    8: '83837725'
+waveplates:
+  calibration_files:
+    '1': calibration/wp1/default_wp1.txt
+    '2': calibration/wp2/default_wp2.txt
+    '3': calibration/wp3/default_wp3.txt
+    '4': calibration/wp4/default_wp4.txt
+    '5': calibration/wp5/default_wp5.txt
+    '6': calibration/wp6/default_wp6.txt
+  num_waveplates: 7
+zaber:
+  baud: 9600
+  port: COM4
+  range:
+    max: 25.3
+    min: 24.0
