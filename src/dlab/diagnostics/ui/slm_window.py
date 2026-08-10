@@ -45,6 +45,7 @@ class SlmWindow(QtWidgets.QMainWindow):
 
         self.setWindowTitle("SlmWindow")
         self.setMinimumSize(700, 900)
+        self.resize(700, 1100)  
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         self._slm_red = SLMController("red")

@@ -39,16 +39,15 @@ bit_depth = DEFAULT_BIT_DEPTH
 _w_L_config = cfg_get("slm.beam_radius_on_slm")
 w_L = float(_w_L_config) if isinstance(_w_L_config, (int, float, str)) else 3.5e-3
 
+
 phase_types = [
+    "Flat",
     "Lens",
-    "Zernike",
-    "Binary",
-    "BinaryGrating",
+    "Lens",
     "Tilt",
     "Vortex",
-    "PhaseJumps",
     "TwoFociStochastic",
-    "FourFociStochastic",
+    "FourFociStochastic"
 ]
 
 
@@ -818,7 +817,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         row += 1
 
         grid.addWidget(QLabel("Focus separation d_s [µm]:"), row, 0)
-        self.le_sep = QLineEdit("50")
+        self.le_sep = QLineEdit("110")
         grid.addWidget(self.le_sep, row, 1)
         row += 1
 
@@ -853,12 +852,12 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         row += 1
 
         grid.addWidget(QLabel("n_d^A (dump A deflection factor):"), row, 0)
-        self.le_n_d_a = QLineEdit("8")
+        self.le_n_d_a = QLineEdit("10")
         grid.addWidget(self.le_n_d_a, row, 1)
         row += 1
 
         grid.addWidget(QLabel("n_d^B (dump B deflection factor):"), row, 0)
-        self.le_n_d_b = QLineEdit("8")
+        self.le_n_d_b = QLineEdit("10")
         grid.addWidget(self.le_n_d_b, row, 1)
         row += 1
 
@@ -868,10 +867,16 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         row += 1
 
         self.cb_noA = QCheckBox("No tilt A")
+        self.cb_noA.setChecked(True)
         self.cb_noB = QCheckBox("No tilt B")
         grid.addWidget(self.cb_noA, row, 0, 1, 2)
         row += 1
         grid.addWidget(self.cb_noB, row, 0, 1, 2)
+        row += 1
+
+        self.cb_dump_x = QCheckBox("Send dumps along x")
+        self.cb_dump_x.setChecked(True)
+        grid.addWidget(self.cb_dump_x, row, 0, 1, 2)
         row += 1
 
     def phase(self):
@@ -904,7 +909,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
 
         ang = np.deg2rad(angle_deg)
         U = X * np.cos(ang) + Y * np.sin(ang)  # main axis
-        V = -X * np.sin(ang) + Y * np.cos(ang)  # orthogonal axis (dump)
+        V = -X * np.sin(ang) + Y * np.cos(ang)  # orthogonal axis
 
         k0 = 2 * np.pi / wl
         k_t = k0 * d_s / (2 * f)
@@ -915,10 +920,13 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         phi_A = k_t * U if tilt_a else 0.0
         phi_B = (-k_t * U if tilt_b else 0.0) + dphi
 
+        # dump axis: U (rotated 90° w.r.t. default) if checked, else V
+        W = U if self.cb_dump_x.isChecked() else V
+
         k_d_a = n_d_a * k_t
         k_d_b = n_d_b * k_t
-        phi_Ap = +k_d_a * V  # dump A along orthogonal axis
-        phi_Bp = -k_d_b * V  # dump B along orthogonal axis
+        phi_Ap = +k_d_a * W
+        phi_Bp = -k_d_b * W
 
         sa, sb = np.sqrt(1 - alpha), np.sqrt(alpha)
         xi_A_tot = 0.0 if sa + sb == 0 else sa / (sa + sb)
@@ -958,23 +966,25 @@ class TypeTwoFociStochastic(BaseTypeWidget):
             "seed": self.le_seed.text(),
             "noA": self.cb_noA.isChecked(),
             "noB": self.cb_noB.isChecked(),
+            "dump_x": self.cb_dump_x.isChecked(),
         }
 
     def load_(self, s):
         self.le_wl.setText(s.get("wl_nm", "1030"))
         self.le_f.setText(s.get("f_m", "0.2"))
-        self.le_sep.setText(s.get("d_s_um", "50"))
+        self.le_sep.setText(s.get("d_s_um", "110"))
         self.le_dphi_pi.setText(s.get("dphi_pi", "0.0"))
         self.le_M.setText(s.get("M", "16"))
         self.le_angle.setText(s.get("angle_deg", "0.0"))
         self.le_alpha.setText(s.get("alpha", "0.5"))
         self.le_beta_a.setText(s.get("beta_a", "0.0"))
         self.le_beta_b.setText(s.get("beta_b", "0.0"))
-        self.le_n_d_a.setText(s.get("n_d_a", "8"))
-        self.le_n_d_b.setText(s.get("n_d_b", "8"))
+        self.le_n_d_a.setText(s.get("n_d_a", "10"))
+        self.le_n_d_b.setText(s.get("n_d_b", "10"))
         self.le_seed.setText(s.get("seed", "123456"))
-        self.cb_noA.setChecked(s.get("noA", False))
+        self.cb_noA.setChecked(s.get("noA", True))
         self.cb_noB.setChecked(s.get("noB", False))
+        self.cb_dump_x.setChecked(s.get("dump_x", True))
 
 class TypeFourFociStochastic(BaseTypeWidget):
     def __init__(self, parent=None):
