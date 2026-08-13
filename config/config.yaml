@@ -48,6 +48,10 @@ slm:
 smaract:
   mcs2:
     locator: network:sn:MCS2-00013918
+    saved_positions:
+      axis0: 0.001000019857
+      axis1: 0.001000134606
+      axis2: 0.001000009619
 stages:
   default_ids:
     0: '00000000'

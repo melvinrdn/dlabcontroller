@@ -15,11 +15,16 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QDoubleValidator
 
-from dlab.boot import get_config
+from dlab.boot import ROOT, get_config
 from dlab.hardware.wrappers.smaract_controller import SmarActAxis, SmarActController
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.config_utils import cfg_get
+from dlab.utils.yaml_utils import read_yaml, write_yaml
+
+
+def _config_path():
+    return ROOT / "config" / "config.yaml"
 
 
 class SmarActAxisRow(QWidget):
@@ -170,6 +175,20 @@ class SmarActStageWindow(QWidget):
         self._axes_layout = QVBoxLayout(self._axes_group)
         main.addWidget(self._axes_group)
 
+        positions_row = QHBoxLayout()
+        self._save_positions_btn = QPushButton("Save Positions")
+        self._save_positions_btn.setEnabled(False)
+        self._save_positions_btn.clicked.connect(self._on_save_positions)
+        positions_row.addWidget(self._save_positions_btn)
+
+        self._goto_saved_positions_btn = QPushButton("Go to Saved Positions")
+        self._goto_saved_positions_btn.setEnabled(False)
+        self._goto_saved_positions_btn.clicked.connect(self._on_goto_saved_positions)
+        positions_row.addWidget(self._goto_saved_positions_btn)
+
+        positions_row.addStretch(1)
+        main.addLayout(positions_row)
+
         main.addStretch(1)
 
     def _log_message(self, msg: str) -> None:
@@ -216,6 +235,8 @@ class SmarActStageWindow(QWidget):
             self._activate_btn.setEnabled(False)
             self._locator_edit.setEnabled(False)
             self._deactivate_btn.setEnabled(True)
+            self._save_positions_btn.setEnabled(True)
+            self._goto_saved_positions_btn.setEnabled(True)
             self._log_message(f"Connected to {locator} ({controller.naxes} axes).")
 
         except Exception as e:
@@ -249,7 +270,61 @@ class SmarActStageWindow(QWidget):
         self._activate_btn.setEnabled(True)
         self._locator_edit.setEnabled(True)
         self._deactivate_btn.setEnabled(False)
+        self._save_positions_btn.setEnabled(False)
+        self._goto_saved_positions_btn.setEnabled(False)
         self._log_message("Disconnected.")
+
+    def _on_save_positions(self) -> None:
+        if self._controller is None:
+            return
+
+        positions: dict[str, float] = {}
+        for row in self._axis_rows:
+            if not row._has_sensor:
+                continue
+            pos = self._controller.get_position(row._axis)
+            if pos is not None:
+                positions[f"axis{row._axis}"] = float(pos)
+
+        if not positions:
+            QMessageBox.warning(self, "Error", "No axis positions available to save.")
+            return
+
+        path = _config_path()
+        data = read_yaml(path)
+        node = data.get("smaract", {}) if isinstance(data.get("smaract"), dict) else {}
+        mcs2_node = node.get("mcs2", {}) if isinstance(node.get("mcs2"), dict) else {}
+        mcs2_node["saved_positions"] = positions
+        node["mcs2"] = mcs2_node
+        data["smaract"] = node
+
+        try:
+            write_yaml(path, data)
+            self._log_message(f"Saved positions: {positions}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save positions: {e}")
+
+    def _on_goto_saved_positions(self) -> None:
+        if self._controller is None:
+            return
+
+        data = read_yaml(_config_path())
+        saved = (((data.get("smaract") or {}).get("mcs2") or {}).get("saved_positions")) or {}
+        if not saved:
+            QMessageBox.information(self, "SmarAct", "No saved positions found.")
+            return
+
+        for row in self._axis_rows:
+            if not row._has_sensor:
+                continue
+            value = saved.get(f"axis{row._axis}")
+            if value is None:
+                continue
+            try:
+                self._controller.move_to(row._axis, float(value), blocking=False)
+                self._log_message(f"Axis {row._axis}: moving to saved position {float(value):.3e} m…")
+            except Exception as e:
+                self._log_message(f"Axis {row._axis}: failed to move to saved position: {e}")
 
     def closeEvent(self, event) -> None:
         if self._controller is not None:
