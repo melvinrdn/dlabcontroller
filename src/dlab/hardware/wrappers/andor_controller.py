@@ -6,6 +6,7 @@ import numpy as np
 from pylablib.devices import Andor
 import pylablib
 
+from dlab.boot import ROOT
 from dlab.utils.config_utils import cfg_get
 
 
@@ -39,8 +40,8 @@ class AndorController:
             return
 
         try:
-            driver_path = cfg_get("paths.drivers_andor", "src/dlab/hardware/drivers/andor_driver")
-            pylablib.par["devices/dlls/andor_sdk2"] = driver_path
+            driver_path = str(cfg_get("paths.drivers_andor", "src/dlab/hardware/drivers/andor_driver"))
+            pylablib.par["devices/dlls/andor_sdk2"] = str((ROOT / driver_path).resolve())
 
             cam = Andor.AndorSDK2Camera()
             exp_us = self._clamp_exposure(DEFAULT_EXPOSURE_US)

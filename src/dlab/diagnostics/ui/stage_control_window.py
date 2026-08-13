@@ -510,6 +510,7 @@ class StageControlWindow(QMainWindow):
         from dlab.diagnostics.ui.auto_waveplate_calib_window import AutoWaveplateCalibWindow
         from dlab.diagnostics.ui.grating_compressor_window import GratingCompressorWindow
         from dlab.diagnostics.ui.piezojena_window import PiezoJenaStageWindow
+        from dlab.diagnostics.ui.smaract_window import SmarActStageWindow
         from dlab.hardware.wrappers.waveplate_calib import WaveplateCalibWidget
 
         self._tabs = QTabWidget()
@@ -526,6 +527,10 @@ class StageControlWindow(QMainWindow):
         # PiezoJena tab
         self._piezojena_view = PiezoJenaStageWindow(log_panel=self._log)
         self._tabs.addTab(self._piezojena_view, "PiezoJena")
+
+        # SmarAct tab
+        self._smaract_view = SmarActStageWindow(log_panel=self._log)
+        self._tabs.addTab(self._smaract_view, "SmarAct")
 
         # Waveplate Calibration tab
         self._calib_widget = WaveplateCalibWidget(
