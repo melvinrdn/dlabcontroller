@@ -30,6 +30,7 @@ paths:
   drivers_andor: src/dlab/hardware/drivers/andor_driver
   drivers_avaspec: src/dlab/hardware/drivers/avaspec_driver
   drivers_slm: src/dlab/hardware/drivers/SLM_driver
+  drivers_smaract: src/dlab/hardware/drivers/smaract_driver
   logs_dir: logs
   ressources_dir: ressources
 piezojena:
@@ -37,11 +38,6 @@ piezojena:
     port: COM6
   nv40_3w:
     port: COMX
-pressure_sensor:
-  grafana_url: http://localhost:3000
-  port: COM3
-  pressure_update_interval_s: 5.0
-  prometheus_port: 8000
 slm:
   beam_radius_on_slm: 0.0035
   defaults_file: ressources/saved_settings/slm_defaults.yaml
@@ -49,6 +45,9 @@ slm:
   green_saved_dir: ressources/saved_settings/SLM_green
   red_default: ressources/saved_settings/SLM_red/red_default_settings.txt
   red_saved_dir: ressources/saved_settings/SLM_red
+smaract:
+  mcs2:
+    locator: network:sn:MCS2-00013918
 stages:
   default_ids:
     0: '00000000'

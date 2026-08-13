@@ -21,7 +21,6 @@ autodoc_mock_imports = [
     "pylablib",
 
     "yaml",
-    "prometheus_client",
 ]
 
 autodoc_mock_imports += [

@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import sys
 
+try:
+    # Must run before PyQt5 is imported: once Qt's own DLLs are loaded into
+    # the process, loading SmarActCTL.dll afterward fails with WinError 1114
+    # (DllMain init failure), regardless of ctypes search mode.
+    from dlab.hardware.wrappers.smaract_controller import preload_dll
+
+    preload_dll()
+except Exception as e:
+    print(f"SmarAct DLL preload failed (SmarAct tab will be unavailable): {e}")
+
 from PyQt5.QtWidgets import (
     QApplication,
     QGroupBox,
@@ -15,19 +25,11 @@ from PyQt5.QtWidgets import (
 )
 
 from dlab.boot import ROOT, bootstrap
-from dlab.hardware.wrappers.pressure_sensor import PressureMonitorWidget
 from dlab.utils.log_panel import LogPanel
 
 
 class DlabControllerWindow(QMainWindow):
-    """
-    Main launcher window for lab instrument control.
-
-    To run Grafana with Prometheus:
-        cd C:\\Prometheus
-        .\\prometheus.exe --config.file=prometheus.yml
-    Grafana credentials: user: admin, password: admin
-    """
+    """Main launcher window for lab instrument control."""
 
     def __init__(self, log_panel: LogPanel):
         super().__init__()
@@ -89,23 +91,12 @@ class DlabControllerWindow(QMainWindow):
         windows_group.setLayout(view_layout)
         main_layout.addWidget(windows_group)
 
-        # Grafana dashboard link
-        dashboard_url = (
-            "http://localhost:3000/d/ad6bbh8/pressure-dashboard"
-            "?orgId=1&from=now-30m&to=now&timezone=browser&refresh=auto"
-        )
-        path_label = QLabel(f'<a href="{dashboard_url}">Open Pressure Dashboard</a>')
-        path_label.setOpenExternalLinks(True)
-        main_layout.addWidget(path_label)
-
         main_layout.addStretch(1)
 
         # Log toggle button
         self._log_button = QPushButton("Hide Log")
         self._log_button.clicked.connect(self._toggle_log)
         main_layout.addWidget(self._log_button)
-
-        self._setup_pressure_log()
 
     def _add_daheng_control(self, layout: QVBoxLayout, name: str, default_index: int):
         """Add a Daheng camera control group with index spinbox."""
@@ -128,9 +119,6 @@ class DlabControllerWindow(QMainWindow):
         box.setLayout(h_layout)
         layout.addWidget(box)
         self._camera_controls[name] = spinbox
-
-    def _setup_pressure_log(self):
-        self._pressure_monitor = PressureMonitorWidget(self, log_panel=self._log)
 
     def _toggle_log(self):
         if self._log.isVisible():
