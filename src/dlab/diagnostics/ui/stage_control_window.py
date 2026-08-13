@@ -556,6 +556,14 @@ class StageControlWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        # Embedded tab widgets don't get their own closeEvent for free when
+        # this window closes, so give the ones that hold live hardware
+        # connections a chance to disconnect cleanly.
+        for view in (self._thorlabs_view, self._gc_view, self._piezojena_view, self._smaract_view):
+            try:
+                view.close()
+            except Exception:
+                pass
         self.closed.emit()
         super().closeEvent(event)
 

@@ -144,6 +144,16 @@ class DlabControllerWindow(QMainWindow):
     # Generic window management
     # -------------------------------------------------------------------------
 
+    def closeEvent(self, event) -> None:
+        """Close every open sub-window so their hardware disconnects cleanly."""
+        for win in list(self._windows.values()) + list(self._daheng_windows.values()):
+            if win is not None:
+                try:
+                    win.close()
+                except Exception:
+                    pass
+        super().closeEvent(event)
+
     def _open_window(
         self,
         key: str,
