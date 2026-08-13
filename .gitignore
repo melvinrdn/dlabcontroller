@@ -37,12 +37,3 @@ config/*local*.yaml
 config/*secrets*.yaml
 
 ressources/calibration/**/calib_*.txt
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# Sphinx build
-docs/build/
-docs/doctrees/

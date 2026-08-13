@@ -1,7 +1,0 @@
-Contributing
-============
-
-TODO
---------------------
-- Refactor the two color scan
-- Add live view on the grid scan

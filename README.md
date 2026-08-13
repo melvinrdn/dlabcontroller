@@ -29,26 +29,14 @@ or:
 uv run python -m dlab.app
 ```
 
-## Documentation
-
-The documentation (user guide, developer guide, and API reference) is available online at https://lund-atto.gitlab.io/dlab/dlabcontroller/
-
-To build and view locally:
-
-```bash
-cd docs
-uv run sphinx-build -b html source build/html
-xdg-open build/html/index.html
-```
-
 ## Project layout
 
 ```
 src/dlab/
-├── ui/          # GUI components
-├── hardware/    # Hardware abstraction and wrappers
-├── core/        # Shared infrastructure (device manager)
-├── utils/       # Utilities
+├── diagnostics/ui/  # GUI windows
+├── hardware/        # Hardware abstraction and wrappers
+├── core/            # Shared infrastructure (device manager)
+├── utils/           # Utilities
 └── app.py
 ```
 
