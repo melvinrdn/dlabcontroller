@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from scipy.ndimage import rotate as sp_rotate
 from PIL import Image, PngImagePlugin
-import cmasher as cmr
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -45,10 +44,12 @@ from dlab.utils.config_utils import cfg_get
 from dlab.utils.paths_utils import data_dir
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.yaml_utils import read_yaml, write_yaml
+from dlab.utils.colormaps import COLORMAPS, resolve_cmap
 from dlab.boot import ROOT
 
 REGISTRY_KEY = "camera:andor:andorcam_1"
 SAVE_NAME = "AndorCam_1"
+SATURATION_VALUE = 65535  # Andor SDK2 frames are handled as 16-bit counts
 
 DEFAULT_PREPROCESS = {
     "enabled": False,
@@ -59,26 +60,9 @@ DEFAULT_PREPROCESS = {
     "y1": 340,
 }
 
-COLORMAPS = [
-    "cmr.rainforest",
-    "cmr.neutral",
-    "cmr.sunburst",
-    "cmr.freeze",
-    "turbo",
-    "viridis",
-    "plasma",
-]
-
 
 def _config_path() -> Path:
     return ROOT / "config" / "config.yaml"
-
-
-def _resolve_cmap(key: str):
-    if key.startswith("cmr."):
-        name = key.split(".", 1)[1]
-        return getattr(cmr, name)
-    return plt.get_cmap(key)
 
 
 class _LiveCaptureThread(QThread):
@@ -154,7 +138,7 @@ class AndorLiveWindow(QWidget):
         self._cbar = None
         self._fixed_cbar_max: float | None = None
         self._cmap_key = "cmr.rainforest"
-        self._cmap = _resolve_cmap(self._cmap_key)
+        self._cmap = resolve_cmap(self._cmap_key)
 
         # Crosshair state
         self._crosshair_visible = False
@@ -244,6 +228,14 @@ class AndorLiveWindow(QWidget):
         self._fix_cbar_cb.toggled.connect(self._fix_value_edit.setEnabled)
         self._fix_cbar_cb.toggled.connect(self._on_fix_cbar)
         self._fix_value_edit.textChanged.connect(self._on_fix_value_changed)
+
+        self._sensor_max_btn = QPushButton("Set Colorbar to Sensor Max")
+        self._sensor_max_btn.setToolTip(
+            "Pin the colorbar max to the sensor's true saturation level, "
+            "the only case where the saturation colormap is meaningful."
+        )
+        self._sensor_max_btn.clicked.connect(self._on_set_sensor_max)
+        param_layout.addWidget(self._sensor_max_btn)
 
         # Background checkbox
         self._background_cb = QCheckBox("Background")
@@ -650,9 +642,14 @@ class AndorLiveWindow(QWidget):
         except ValueError:
             pass
 
+    def _on_set_sensor_max(self):
+        self._fix_value_edit.setText(str(SATURATION_VALUE))
+        if not self._fix_cbar_cb.isChecked():
+            self._fix_cbar_cb.setChecked(True)
+
     def _on_cmap_changed(self, key: str):
         self._cmap_key = key
-        self._cmap = _resolve_cmap(key)
+        self._cmap = resolve_cmap(key)
         if self._image_artist is not None:
             self._image_artist.set_cmap(self._cmap)
             if self._cbar:

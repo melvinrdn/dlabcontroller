@@ -13,7 +13,6 @@ from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToo
 from matplotlib.widgets import RectangleSelector
 from matplotlib.patches import Rectangle
 from PIL import Image, PngImagePlugin
-import cmasher as cmr
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -32,26 +31,16 @@ from dlab.core.device_registry import REGISTRY
 from dlab.utils.paths_utils import data_dir
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.yaml_utils import read_yaml, write_yaml
+from dlab.utils.colormaps import COLORMAPS, resolve_cmap
 from dlab.boot import ROOT
 
 PIXEL_SIZE_M = 3.45e-6
 MIN_INTERVAL_US = 500_000
-
-COLORMAPS = [
-    "cmr.rainforest", "cmr.neutral", "cmr.sunburst",
-    "cmr.freeze", "turbo", "viridis", "plasma"
-]
+SENSOR_MAX_VALUE = 255  # Daheng cameras are always run in MONO8
 
 
 def _config_path() -> Path:
     return ROOT / "config" / "config.yaml"
-
-
-def _resolve_cmap(key: str):
-    if key.startswith("cmr."):
-        name = key.split(".", 1)[1]
-        return getattr(cmr, name)
-    return plt.get_cmap(key)
 
 
 class _LiveCaptureThread(QThread):
@@ -126,7 +115,7 @@ class DahengLiveWindow(QWidget):
         self._fix_cbar = False
         self._fixed_vmax: float | None = None
         self._cmap_key = "cmr.rainforest"
-        self._cmap = _resolve_cmap(self._cmap_key)
+        self._cmap = resolve_cmap(self._cmap_key)
 
         # ROI state
         self._roi_px: tuple[int, int, int, int] | None = None
@@ -225,6 +214,14 @@ class DahengLiveWindow(QWidget):
         self._fix_value_edit.textChanged.connect(self._on_fix_value_changed)
         self._fix_cbar_cb.toggled.connect(self._fix_value_edit.setEnabled)
         param_layout.addWidget(self._fix_value_edit)
+
+        self._sensor_max_btn = QPushButton("Set Colorbar to Sensor Max")
+        self._sensor_max_btn.setToolTip(
+            "Pin the colorbar max to the sensor's true saturation level, "
+            "the only case where the saturation colormap is meaningful."
+        )
+        self._sensor_max_btn.clicked.connect(self._on_set_sensor_max)
+        param_layout.addWidget(self._sensor_max_btn)
 
         # Colormap
         cmap_group = QGroupBox("Colormap")
@@ -593,9 +590,14 @@ class DahengLiveWindow(QWidget):
         except ValueError:
             pass
 
+    def _on_set_sensor_max(self):
+        self._fix_value_edit.setText(str(SENSOR_MAX_VALUE))
+        if not self._fix_cbar_cb.isChecked():
+            self._fix_cbar_cb.setChecked(True)
+
     def _on_cmap_changed(self, key: str):
         self._cmap_key = key
-        self._cmap = _resolve_cmap(key)
+        self._cmap = resolve_cmap(key)
         if self._image_artist is not None:
             self._image_artist.set_cmap(self._cmap)
             if self._cbar:

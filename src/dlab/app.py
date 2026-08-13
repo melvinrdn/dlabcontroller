@@ -59,44 +59,56 @@ class DlabControllerWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Windows group
-        windows_group = QGroupBox("Windows")
-        view_layout = QVBoxLayout()
-
-        # Main instrument buttons
-        buttons = [
-            ("Open SLM", self._open_slm),
+        detector_buttons = [
             ("Open Andor", self._open_andor),
             ("Open Lumenera SP402S", self._open_lumenera),
             ("Open Avaspec ω", self._open_avaspec_w),
             ("Open Avaspec 2ω", self._open_avaspec_2w),
             ("Open Avaspec 3ω", self._open_avaspec_3w),
             ("Open Powermeter", self._open_powermeter),
+        ]
+        stage_buttons = [
             ("Open Stage Control", self._open_stage_control),
+            ("Open SLM", self._open_slm),
+        ]
+        other_buttons = [
             ("Open Scan Panel", self._open_scan),
             ("Open Phase Lock ω/2ω", self._open_phase_lock_2w),
             ("Open Phase Lock ω/3ω", self._open_phase_lock_3w),
         ]
-        for label, callback in buttons:
-            btn = QPushButton(label)
-            btn.clicked.connect(callback)
-            view_layout.addWidget(btn)
 
-        # Daheng camera controls
+        detectors_group, detectors_layout = self._build_group("Detectors", detector_buttons)
         for i, name in enumerate(
             ["DahengCam_1", "DahengCam_2", "DahengCam_3"], start=1
         ):
-            self._add_daheng_control(view_layout, name, default_index=i)
+            self._add_daheng_control(detectors_layout, name, default_index=i)
+        main_layout.addWidget(detectors_group)
 
-        windows_group.setLayout(view_layout)
-        main_layout.addWidget(windows_group)
+        stages_group, _ = self._build_group("Stages", stage_buttons)
+        main_layout.addWidget(stages_group)
+
+        other_group, _ = self._build_group("Other", other_buttons)
+        main_layout.addWidget(other_group)
 
         main_layout.addStretch(1)
 
         # Log toggle button
-        self._log_button = QPushButton("Hide Log")
+        self._log_button = QPushButton("Show Log")
         self._log_button.clicked.connect(self._toggle_log)
         main_layout.addWidget(self._log_button)
+
+    def _build_group(
+        self, title: str, buttons: list[tuple[str, object]]
+    ) -> tuple[QGroupBox, QVBoxLayout]:
+        """Build a QGroupBox containing one button per (label, callback) pair."""
+        group = QGroupBox(title)
+        layout = QVBoxLayout()
+        for label, callback in buttons:
+            btn = QPushButton(label)
+            btn.clicked.connect(callback)
+            layout.addWidget(btn)
+        group.setLayout(layout)
+        return group, layout
 
     def _add_daheng_control(self, layout: QVBoxLayout, name: str, default_index: int):
         """Add a Daheng camera control group with index spinbox."""
@@ -304,7 +316,6 @@ def main():
     app = QApplication(sys.argv)
 
     log_panel = LogPanel()
-    log_panel.show()
 
     window = DlabControllerWindow(log_panel)
     window.show()
