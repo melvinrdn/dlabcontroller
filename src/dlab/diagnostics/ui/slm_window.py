@@ -40,8 +40,6 @@ class SlmWindow(QtWidgets.QMainWindow):
     def __init__(self, log_panel: LogPanel | None = None):
         super().__init__()
         self._log = log_panel
-        if self._log is not None:
-            self._log.installEventFilter(self)
 
         self.setWindowTitle("SlmWindow")
         self.setMinimumSize(700, 900)
@@ -290,7 +288,8 @@ class SlmWindow(QtWidgets.QMainWindow):
                 if w.name_() not in active:
                     continue
                 lv = w.phase()
-            except Exception:
+            except Exception as e:
+                self._log_message(f"Skipping '{w.name_()}' in composed phase: {e}")
                 continue
             composed = (composed + lv) % (slm.bit_depth + 1)
 
@@ -526,6 +525,12 @@ class SlmWindow(QtWidgets.QMainWindow):
             self._slm_green.close()
         except Exception as e:
             self._log_message(f"Error during shutdown: {e}")
+
+        for key in (
+            "slm:red:window", "slm:red:active_classes", "slm:red:widgets",
+            "slm:red:params", "slm:red:last_update", "slm:red:controller",
+        ):
+            REGISTRY.unregister(key)
 
         self.closed.emit()
         super().closeEvent(a0)
