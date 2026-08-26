@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, PngImagePlugin
 
 from PyQt5.QtCore import QTimer, QObject, pyqtSignal, QThread
 from PyQt5.QtWidgets import (
@@ -30,6 +29,12 @@ from dlab.core.device_registry import REGISTRY
 from dlab.hardware.wrappers.phase_settings import PhaseSettings
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.paths_utils import data_dir, cfg_get
+from dlab.diagnostics.ui.scans.scan_utils import (
+    confirm_large_scan,
+    generate_positions,
+    save_png_with_meta,
+    save_png_with_meta_8bit,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -46,7 +51,7 @@ SPECTRUM_MEASUREMENT_DELAY_S = 0.01
 # -----------------------------------------------------------------------------
 
 
-def power_to_angle(power_fraction: float, _amp_unused: float, phase_deg: float) -> float:
+def power_to_angle(power_fraction: float, phase_deg: float) -> float:
     """Convert power fraction (0-1) to waveplate angle using calibration phase."""
     y = float(np.clip(power_fraction, 0.0, 1.0))
     return (phase_deg + (45.0 / np.pi) * float(np.arccos(2.0 * y - 1.0))) % 360.0
@@ -92,45 +97,6 @@ def _reg_key_maxvalue(wp_index: int) -> str:
     return f"waveplate:max_value:{wp_index}"
 
 
-# -----------------------------------------------------------------------------
-# Helper functions - File I/O
-# -----------------------------------------------------------------------------
-
-
-def _save_png_with_meta(folder: Path, filename: str, frame_u16: np.ndarray, meta: dict) -> Path:
-    """Save a 16-bit PNG image with metadata. Requires uint16 input."""
-    if frame_u16.dtype != np.uint16:
-        raise TypeError(
-            f"_save_png_with_meta requires uint16, got {frame_u16.dtype}. "
-            "Cast explicitly before calling."
-        )
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / filename
-    img = Image.fromarray(frame_u16, mode="I;16")
-    pnginfo = PngImagePlugin.PngInfo()
-    for k, v in meta.items():
-        pnginfo.add_text(str(k), str(v))
-    img.save(path.as_posix(), format="PNG", pnginfo=pnginfo)
-    return path
-
-
-def _save_png_with_meta_8bit(folder: Path, filename: str, frame_u8: np.ndarray, meta: dict) -> Path:
-    """Save an 8-bit grayscale PNG image with metadata. Requires uint8 input."""
-    if frame_u8.dtype != np.uint8:
-        raise TypeError(
-            f"_save_png_with_meta_8bit requires uint8, got {frame_u8.dtype}. "
-            "Cast explicitly before calling."
-        )
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / filename
-    img = Image.fromarray(frame_u8, mode="L")
-    pnginfo = PngImagePlugin.PngInfo()
-    for k, v in meta.items():
-        pnginfo.add_text(str(k), str(v))
-    img.save(path.as_posix(), format="PNG", pnginfo=pnginfo)
-    return path
-
-
 def _detector_display_name(det_key: str, dev, meta: dict | None) -> str:
     """Get a human-readable name for a detector."""
     if meta and str(meta.get("DeviceName", "")).strip():
@@ -150,25 +116,8 @@ def _detector_display_name(det_key: str, dev, meta: dict | None) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Helper functions - Position generation
+# Helper functions - Scan time estimate
 # -----------------------------------------------------------------------------
-
-
-def _generate_positions(start: float, end: float, step: float) -> list[float]:
-    """Generate list of positions for a scan axis."""
-    if step <= 0:
-        raise ValueError("Step must be > 0.")
-    if end >= start:
-        n = int((end - start) // step)
-        vals = [start + i * step for i in range(n + 1)]
-        if vals[-1] < end:
-            vals.append(end)
-    else:
-        n = int((start - end) // step)
-        vals = [start - i * step for i in range(n + 1)]
-        if vals[-1] > end:
-            vals.append(end)
-    return vals
 
 
 def _detector_time_estimate_s(det_key: str, params: tuple) -> float:
@@ -350,10 +299,10 @@ class GridScanWorker(QObject):
 
         if is_8bit:
             frame_out = np.clip(frame, 0, 255).astype(np.uint8, copy=False)
-            _save_png_with_meta_8bit(det_day, fn, frame_out, file_meta)
+            save_png_with_meta_8bit(det_day, fn, frame_out, file_meta)
         else:
             frame_out = np.clip(frame, 0, 65535).astype(np.uint16, copy=False)
-            _save_png_with_meta(det_day, fn, frame_out, file_meta)
+            save_png_with_meta(det_day, fn, frame_out, file_meta)
         return fn
 
     def _save_spectrum(
@@ -673,6 +622,8 @@ class GridScanWorker(QObject):
                             break
 
                     if not move_ok:
+                        done += len(detectors)
+                        self.progress.emit(done, total_images)
                         continue
 
                     time.sleep(float(self.settle_s))
@@ -800,9 +751,9 @@ class GridScanTab(QWidget):
         layout.addLayout(picker)
 
         # Axes table
-        self._axes_tbl = QTableWidget(0, 9)
+        self._axes_tbl = QTableWidget(0, 8)
         self._axes_tbl.setHorizontalHeaderLabels(
-            ["Stage", "Param", "Start", "End", "Step", "Screen", "Power Mode", "Max Value (W)", "Go Max"]
+            ["Stage", "Param", "Start", "End", "Step", "Screen", "Power Mode", "Max Value (W)"]
         )
         self._axes_tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._axes_tbl.setEditTriggers(QAbstractItemView.AllEditTriggers)
@@ -1010,9 +961,6 @@ class GridScanTab(QWidget):
         self._axes_tbl.setCellWidget(r, 6, pm)
 
         self._axes_tbl.setItem(r, 7, QTableWidgetItem(""))
-        gm = QCheckBox()
-        gm.setEnabled(False)
-        self._axes_tbl.setCellWidget(r, 8, gm)
 
         def on_item_changed(item):
             if item.row() != r or item.column() != 1:
@@ -1046,8 +994,6 @@ class GridScanTab(QWidget):
         self._axes_tbl.setCellWidget(r, 6, pm)
 
         self._axes_tbl.setItem(r, 7, QTableWidgetItem(""))
-        gm = QCheckBox()
-        self._axes_tbl.setCellWidget(r, 8, gm)
 
     def _on_remove_axis(self) -> None:
         rows = sorted({idx.row() for idx in self._axes_tbl.selectedIndexes()}, reverse=True)
@@ -1069,6 +1015,14 @@ class GridScanTab(QWidget):
 
     def _swap_axis_rows(self, r1: int, r2: int) -> None:
         for c in range(self._axes_tbl.columnCount()):
+            w1 = self._axes_tbl.cellWidget(r1, c)
+            w2 = self._axes_tbl.cellWidget(r2, c)
+            if hasattr(w1, "isChecked") and hasattr(w2, "isChecked"):
+                checked1, checked2 = w1.isChecked(), w2.isChecked()
+                w1.setChecked(checked2)
+                w2.setChecked(checked1)
+                continue
+
             x = self._axes_tbl.item(r1, c)
             y = self._axes_tbl.item(r2, c)
             t1 = x.text() if x else ""
@@ -1129,7 +1083,7 @@ class GridScanTab(QWidget):
             if ax.startswith("slm:"):
                 if param == "":
                     raise ValueError(f"SLM axis {ax}: missing parameter name.")
-                vals = _generate_positions(start, end, step)
+                vals = generate_positions(start, end, step)
                 axes.append((ax, vals))
                 axes_meta[ax] = {
                     "param": param,
@@ -1149,9 +1103,9 @@ class GridScanTab(QWidget):
                 if amp_off[1] is None:
                     raise ValueError(f"{ax}: Power mode ON but no calibration.")
                 phase = float(amp_off[1])
-                start_angle = power_to_angle(sf, 1.0, phase)
+                start_angle = power_to_angle(sf, phase)
                 end_angle_abs = start_angle + end
-                pos = _generate_positions(start_angle, end_angle_abs, step)
+                pos = generate_positions(start_angle, end_angle_abs, step)
                 axes.append((ax, pos))
 
                 max_item = self._axes_tbl.item(r, 7)
@@ -1172,7 +1126,7 @@ class GridScanTab(QWidget):
                     "max_value_W": float(mv),
                 }
             else:
-                pos = _generate_positions(start, end, step)
+                pos = generate_positions(start, end, step)
                 axes.append((ax, pos))
                 axes_meta[ax] = {
                     "pm": False,
@@ -1267,6 +1221,12 @@ class GridScanTab(QWidget):
             p = self._collect_params()
         except Exception as e:
             QMessageBox.critical(self, "Invalid parameters", str(e))
+            return
+
+        total_points = 1
+        for _, pos in p["axes"]:
+            total_points *= max(1, len(pos))
+        if not confirm_large_scan(self, total_points, len(p["camera_params"])):
             return
 
         self._cached_params = p
