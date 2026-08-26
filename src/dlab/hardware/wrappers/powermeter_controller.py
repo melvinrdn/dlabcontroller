@@ -1,4 +1,4 @@
-from typing import Optional, Any, Dict
+from typing import Optional
 
 import pyvisa
 from ThorlabsPM100 import ThorlabsPM100
@@ -42,31 +42,6 @@ class PowermeterController:
         finally:
             self.instrument = None
             self.power_meter = None
-
-    def get_config(self) -> Dict[str, Any]:
-        if self.power_meter is None:
-            raise PowermeterControllerError("Device not active")
-
-        pm = self.power_meter
-
-        def _val(x):
-            try:
-                return x() if callable(x) else x
-            except Exception:
-                return None
-
-        cfg = {
-            "wavelength_nm": _val(pm.sense.correction.wavelength),
-            "averaging_count": _val(pm.sense.average.count),
-            "auto_range": _val(pm.sense.power.dc.range.auto),
-            "lpass_state": _val(pm.input.pdiode.filter.lpass.state),
-        }
-        if hasattr(pm, "getconfigure"):
-            try:
-                cfg["raw_configure"] = pm.getconfigure()
-            except Exception:
-                cfg["raw_configure"] = None
-        return cfg
 
     def read_power(self) -> float:
         """

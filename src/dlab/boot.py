@@ -18,7 +18,7 @@ def load_config(path: Path) -> Dict[str, Any]:
         import yaml
     except ImportError:
         raise SystemExit(
-            "Missing PyYAML. Run scripts/setup.ps1"
+            "Missing PyYAML. Run 'uv sync' from the repository root."
         )
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
