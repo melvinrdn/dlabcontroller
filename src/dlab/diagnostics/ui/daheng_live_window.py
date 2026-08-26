@@ -1031,12 +1031,6 @@ class DahengLiveWindow(QWidget):
         """Grab frame(s) for use in scanning routines."""
         if not self._cam:
             raise DahengControllerError("Camera not activated.")
-        was_live = bool(self._live_running)
-        if was_live:
-            try:
-                self._stop_capture()
-            except Exception:
-                pass
         try:
             exp_us = int(self._exposure_edit.text())
         except ValueError:
@@ -1047,9 +1041,12 @@ class DahengLiveWindow(QWidget):
             device_gain = DEFAULT_GAIN
 
         def _cap_once(cur_exp_us):
-            self._cam.set_exposure(cur_exp_us)
-            self._cam.set_gain(device_gain)
-            return self._cam.capture_single(cur_exp_us, device_gain)
+            # Share the live thread's capture lock instead of stopping it, so
+            # the live view keeps running while a scan/background frame is grabbed.
+            with self._capture_lock:
+                self._cam.set_exposure(cur_exp_us)
+                self._cam.set_gain(device_gain)
+                return self._cam.capture_single(cur_exp_us, device_gain)
 
         n = max(1, int(averages))
         acc = None
