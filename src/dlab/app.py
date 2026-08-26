@@ -262,7 +262,7 @@ class DlabControllerWindow(QMainWindow):
     def _open_scan(self):
         from dlab.diagnostics.ui.scans.scan_window import ScanWindow
 
-        self._open_window("scan", ScanWindow, "Scan")
+        self._open_window("scan", ScanWindow, "Scan", log_panel=self._log)
 
     def _open_powermeter(self):
         from dlab.diagnostics.ui.powermeter_live_window import PowermeterLiveWindow
