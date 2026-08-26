@@ -171,6 +171,22 @@ def _generate_positions(start: float, end: float, step: float) -> list[float]:
     return vals
 
 
+def _detector_time_estimate_s(det_key: str, params: tuple) -> float:
+    """Lower-bound capture time for one detector acquisition, mirroring the
+    worker's _capture_* methods. Ignores per-frame readout/transfer overhead."""
+    if det_key.startswith("powermeter:"):
+        period_ms = float(params[0]) if len(params) >= 1 else 100.0
+        averages = int(params[1]) if len(params) >= 2 else 1
+        return max(0, averages - 1) * period_ms / 1000.0
+    if det_key.startswith("spectrometer:"):
+        int_ms = float(params[0]) if len(params) >= 1 else 0.0
+        averages = int(params[1]) if len(params) >= 2 else 1
+        return (int_ms / 1000.0 + SPECTRUM_MEASUREMENT_DELAY_S) * averages
+    exposure_us = float(params[0]) if len(params) >= 1 else 0.0
+    averages = int(params[1]) if len(params) >= 2 else 1
+    return (exposure_us / 1e6) * averages
+
+
 # -----------------------------------------------------------------------------
 # Worker thread
 # -----------------------------------------------------------------------------
@@ -874,6 +890,10 @@ class GridScanTab(QWidget):
     def _create_controls_row(self) -> QHBoxLayout:
         layout = QHBoxLayout()
 
+        self._estimate_btn = QPushButton("Estimate Scan Time")
+        self._estimate_btn.clicked.connect(self._on_estimate_time)
+        layout.addWidget(self._estimate_btn)
+
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_start)
         layout.addWidget(self._start_btn)
@@ -1199,6 +1219,48 @@ class GridScanTab(QWidget):
     # -------------------------------------------------------------------------
     # Scan control
     # -------------------------------------------------------------------------
+
+    def _on_estimate_time(self) -> None:
+        try:
+            p = self._collect_params()
+        except Exception as e:
+            QMessageBox.critical(self, "Invalid parameters", str(e))
+            return
+
+        axis_counts = [len(pos) for _, pos in p["axes"]]
+        total_points = 1
+        for n in axis_counts:
+            total_points *= max(1, n)
+        n_detectors = max(1, len(p["camera_params"]))
+        total_acquisitions = total_points * n_detectors
+
+        detector_time = sum(
+            _detector_time_estimate_s(det_key, params)
+            for det_key, params in p["camera_params"].items()
+        )
+        time_per_point = p["settle"] + detector_time
+        total = total_points * time_per_point
+        hours = int(total // 3600)
+        minutes = int((total % 3600) // 60)
+        seconds = int(total % 60)
+
+        axes_desc = "\n".join(
+            f"  {ax}: {n} points" for (ax, _), n in zip(p["axes"], axis_counts)
+        )
+
+        msg = (
+            f"Axes:\n{axes_desc}\n\n"
+            f"Total grid points: {total_points}\n"
+            f"Detectors: {n_detectors}\n"
+            f"Total acquisitions: {total_acquisitions}\n\n"
+            f"Settle per point: {p['settle']:.2f} s\n"
+            f"Detector acquisition per point: {detector_time:.2f} s\n"
+            f"Min per point: {time_per_point:.2f} s\n\n"
+            f"Estimated MINIMUM total: {hours}h {minutes}min {seconds}s\n\n"
+            f"(Lower bound — excludes stage transit time between points.)"
+        )
+        QMessageBox.information(self, "Scan Time Estimate", msg)
+        self._log_message(f"Estimated minimum scan time: {hours}h {minutes}min {seconds}s")
 
     def _on_start(self) -> None:
         try:
