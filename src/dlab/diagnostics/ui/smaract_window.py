@@ -37,12 +37,14 @@ class SmarActAxisRow(QWidget):
         has_sensor: bool,
         log_panel: LogPanel | None = None,
         parent: QWidget | None = None,
+        label: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
         self._axis = axis
         self._has_sensor = has_sensor
         self._log = log_panel
+        self._label_text = label or f"Axis {self._axis}:"
 
         self._poll = QTimer(self)
         self._poll.setInterval(200)
@@ -56,8 +58,8 @@ class SmarActAxisRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setSpacing(5)
 
-        label = QLabel(f"Axis {self._axis}:")
-        label.setFixedWidth(60)
+        label = QLabel(self._label_text)
+        label.setFixedWidth(140)
         layout.addWidget(label)
 
         self._home_btn = QPushButton("Home")
@@ -211,15 +213,23 @@ class SmarActStageWindow(QWidget):
                 row.deleteLater()
             self._axis_rows = []
 
+            axis_labels = [
+                "Z position:",
+                "X position (fwd/backward):",
+                "Y position (up/down):",
+            ]
+
             self._axis_registry_keys = []
             for axis in range(controller.naxes):
                 has_sensor = controller.has_sensor(axis)
+                label = axis_labels[axis] if axis < len(axis_labels) else f"Axis {axis}:"
                 row = SmarActAxisRow(
                     controller,
                     axis,
                     has_sensor=has_sensor,
                     log_panel=self._log,
                     parent=self._axes_group,
+                    label=label,
                 )
                 self._axis_rows.append(row)
                 self._axes_layout.addWidget(row)
