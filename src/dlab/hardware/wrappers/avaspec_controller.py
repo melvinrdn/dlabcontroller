@@ -25,8 +25,7 @@ def _avaspec_calibration_path():
 
 
 def _is_pending(exc: Exception) -> bool:
-    s = str(exc)
-    return "ERR_OPERATION_PENDING" in s or "-5" in s
+    return "ERR_OPERATION_PENDING" in str(exc)
 
 
 class AvaspecController:
