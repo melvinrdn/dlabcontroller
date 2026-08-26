@@ -47,7 +47,8 @@ phase_types = [
     "Tilt",
     "Vortex",
     "TwoFociStochastic",
-    "FourFociStochastic"
+    "FourFociStochastic",
+    "Hypergeometric"
 ]
 
 
@@ -986,6 +987,159 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.cb_noB.setChecked(s.get("noB", False))
         self.cb_dump_x.setChecked(s.get("dump_x", True))
 
+class TypeHypergeometric(BaseTypeWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.name = "Hypergeometric"
+
+        layout = QVBoxLayout(self)
+        group = QGroupBox("Hypergeometric (fine vortex) Settings")
+        layout.addWidget(group)
+        grid = QGridLayout(group)
+
+        row = 0
+        grid.addWidget(QLabel("Wavelength λ [nm]:"), row, 0)
+        self.le_wl = QLineEdit("1030")
+        grid.addWidget(self.le_wl, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Focal length f [m]:"), row, 0)
+        self.le_f = QLineEdit("0.2")
+        grid.addWidget(self.le_f, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Topological charge l:"), row, 0)
+        self.le_l = QLineEdit("3")
+        grid.addWidget(self.le_l, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Pupil radius R [mm]:"), row, 0)
+        self.le_R = QLineEdit("2.0")
+        grid.addWidget(self.le_R, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Target waist factor (x diffraction limit):"), row, 0)
+        self.le_w0_factor = QLineEdit("2.0")
+        grid.addWidget(self.le_w0_factor, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Pixels per patch M:"), row, 0)
+        self.le_M = QLineEdit("4")
+        grid.addWidget(self.le_M, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Dump shift dx [µm]:"), row, 0)
+        self.le_dump_dx = QLineEdit("0.0")
+        grid.addWidget(self.le_dump_dx, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Dump shift dy [µm]:"), row, 0)
+        self.le_dump_dy = QLineEdit("1200.0")
+        grid.addWidget(self.le_dump_dy, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("seed:"), row, 0)
+        self.le_seed = QLineEdit("123456")
+        grid.addWidget(self.le_seed, row, 1)
+        row += 1
+
+    def phase(self):
+        try:
+            wl = float(self.le_wl.text()) * 1e-9
+            f = float(self.le_f.text())
+            l_charge = int(float(self.le_l.text()))
+            R_pupil = float(self.le_R.text()) * 1e-3
+            w0_factor = float(self.le_w0_factor.text())
+            M = int(float(self.le_M.text()))
+            dump_dx = float(self.le_dump_dx.text()) * 1e-6
+            dump_dy = float(self.le_dump_dy.text()) * 1e-6
+            seed = float(self.le_seed.text())
+        except:
+            return np.zeros(slm_size)
+
+        if wl <= 0 or f == 0 or R_pupil <= 0 or w0_factor <= 0 or M < 1:
+            return np.zeros(slm_size)
+
+        Ny, Nx = slm_size
+        x = (np.arange(Nx) - Nx // 2) * pixel_size
+        y = (np.arange(Ny) - Ny // 2) * pixel_size
+        X, Y = np.meshgrid(x, y, indexing="xy")
+
+        # target: a proper LG_0^l mode at focus (amplitude vanishes smoothly at
+        # the core), waist set relative to the full-pupil diffraction limit
+        w0_diffraction_limit = wl * f / (np.pi * R_pupil)
+        w0_target = w0_factor * w0_diffraction_limit
+
+        dx_focus = wl * f / (Nx * pixel_size)
+        dy_focus = wl * f / (Ny * pixel_size)
+        x_f = (np.arange(Nx) - Nx // 2) * dx_focus
+        y_f = (np.arange(Ny) - Ny // 2) * dy_focus
+        Xf, Yf = np.meshgrid(x_f, y_f, indexing="xy")
+
+        rho_f = np.hypot(Xf, Yf)
+        phi_f = np.arctan2(Yf, Xf)
+        amp_f = (np.sqrt(2) * rho_f / w0_target) ** abs(l_charge) * np.exp(
+            -(rho_f**2) / w0_target**2
+        )
+        E_target = amp_f * np.exp(1j * l_charge * phi_f)
+
+        # required SLM field = inverse FT of the focus target = the
+        # hypergeometric-Gaussian / Kummer mode (Karimi 2007, Bekshaev 2008)
+        E_required = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(E_target), norm="ortho"))
+
+        pupil = np.hypot(X, Y) <= R_pupil
+        A_required = np.abs(E_required)
+        max_in_pupil = A_required[pupil].max() if np.any(pupil) else A_required.max()
+        if max_in_pupil <= 0:
+            return np.zeros(slm_size)
+        A_required = A_required / max_in_pupil
+        phi_required = np.angle(E_required)
+
+        k0 = 2 * np.pi / wl
+        phi_dump = (k0 / f) * (dump_dx * X + dump_dy * Y)
+
+        patch_size = M * pixel_size
+        ix = np.floor((X - X.min()) / patch_size).astype(np.int64)
+        iy = np.floor((Y - Y.min()) / patch_size).astype(np.int64)
+        pid = iy * (ix.max() + 1) + ix
+        uniq, inv = np.unique(pid, return_inverse=True)
+
+        target_frac = np.where(pupil, np.clip(A_required, 0.0, 1.0) ** 2, 0.0)
+        block_sum = np.bincount(inv.ravel(), weights=target_frac.ravel())
+        block_count = np.bincount(inv.ravel())
+        block_frac = block_sum / block_count
+
+        rng = np.random.default_rng(int(seed))
+        is_signal = (rng.random(uniq.size) < block_frac)[inv]
+
+        phase = np.where(is_signal, phi_required, phi_dump)
+        wrapped = np.mod(phase, 2 * np.pi)
+        return wrapped * (bit_depth / (2 * np.pi))
+
+    def save_(self):
+        return {
+            "wl_nm": self.le_wl.text(),
+            "f_m": self.le_f.text(),
+            "l": self.le_l.text(),
+            "R_mm": self.le_R.text(),
+            "w0_factor": self.le_w0_factor.text(),
+            "M": self.le_M.text(),
+            "dump_dx_um": self.le_dump_dx.text(),
+            "dump_dy_um": self.le_dump_dy.text(),
+            "seed": self.le_seed.text(),
+        }
+
+    def load_(self, s):
+        self.le_wl.setText(s.get("wl_nm", "1030"))
+        self.le_f.setText(s.get("f_m", "0.2"))
+        self.le_l.setText(s.get("l", "3"))
+        self.le_R.setText(s.get("R_mm", "2.0"))
+        self.le_w0_factor.setText(s.get("w0_factor", "2.0"))
+        self.le_M.setText(s.get("M", "4"))
+        self.le_dump_dx.setText(s.get("dump_dx_um", "0.0"))
+        self.le_dump_dy.setText(s.get("dump_dy_um", "1200.0"))
+        self.le_seed.setText(s.get("seed", "123456"))
+        
 class TypeFourFociStochastic(BaseTypeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1114,6 +1268,7 @@ def new_type(parent, typ):
         "PhaseJumps": TypePhaseJumps,
         "TwoFociStochastic": TypeTwoFociStochastic,
         "FourFociStochastic": TypeFourFociStochastic,
+        "Hypergeometric": TypeHypergeometric,
     }
     if typ not in types_dict:
         raise ValueError(
