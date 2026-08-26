@@ -35,7 +35,7 @@ from dlab.utils.colormaps import COLORMAPS, resolve_cmap
 from dlab.boot import ROOT
 
 PIXEL_SIZE_M = 2.74e-6
-SATURATION_VALUE = 4095  # Lumenera SP402S has a 12-bit ADC mapped into uint16
+SATURATION_VALUE = 65520  # 12-bit ADC (4095) left-shifted 4 bits into the 16-bit container
 MIN_INTERVAL_US = 500_000
 DEFAULT_DARK_AVERAGES = 32
 
@@ -120,7 +120,7 @@ class LumeneraLiveWindow(QWidget):
         self._cbar = None
         self._fix_cbar = False
         self._fixed_vmax: float | None = None
-        self._cmap_key = "cmr.rainforest"
+        self._cmap_key = "saturation"
         self._cmap = resolve_cmap(self._cmap_key)
 
         # Crosshair 1 state
@@ -278,30 +278,30 @@ class LumeneraLiveWindow(QWidget):
         cmap_layout.addWidget(self._cmap_combo)
         param_layout.addWidget(cmap_group)
 
-        # ROI controls (hardware ROI in mm)
-        roi_group = QGroupBox("ROI (hardware, mm)")
+        # ROI controls (hardware ROI in sensor pixel coordinates)
+        roi_group = QGroupBox("ROI (hardware, px)")
         roi_layout = QVBoxLayout(roi_group)
 
         roi_row1 = QHBoxLayout()
-        roi_row1.addWidget(QLabel("X:"))
-        self._roi_x_edit = QLineEdit("0")
-        self._roi_x_edit.setMaximumWidth(70)
-        roi_row1.addWidget(self._roi_x_edit)
-        roi_row1.addWidget(QLabel("Y:"))
-        self._roi_y_edit = QLineEdit("0")
-        self._roi_y_edit.setMaximumWidth(70)
-        roi_row1.addWidget(self._roi_y_edit)
+        roi_row1.addWidget(QLabel("X1:"))
+        self._roi_x1_edit = QLineEdit("0")
+        self._roi_x1_edit.setMaximumWidth(70)
+        roi_row1.addWidget(self._roi_x1_edit)
+        roi_row1.addWidget(QLabel("X2:"))
+        self._roi_x2_edit = QLineEdit("4512")  # full sensor width, px
+        self._roi_x2_edit.setMaximumWidth(70)
+        roi_row1.addWidget(self._roi_x2_edit)
         roi_layout.addLayout(roi_row1)
 
         roi_row2 = QHBoxLayout()
-        roi_row2.addWidget(QLabel("W:"))
-        self._roi_w_edit = QLineEdit("12.36")  # full sensor in mm = 4512 * 2.74e-3
-        self._roi_w_edit.setMaximumWidth(70)
-        roi_row2.addWidget(self._roi_w_edit)
-        roi_row2.addWidget(QLabel("H:"))
-        self._roi_h_edit = QLineEdit("12.36")
-        self._roi_h_edit.setMaximumWidth(70)
-        roi_row2.addWidget(self._roi_h_edit)
+        roi_row2.addWidget(QLabel("Y1:"))
+        self._roi_y1_edit = QLineEdit("0")
+        self._roi_y1_edit.setMaximumWidth(70)
+        roi_row2.addWidget(self._roi_y1_edit)
+        roi_row2.addWidget(QLabel("Y2:"))
+        self._roi_y2_edit = QLineEdit("4512")  # full sensor height, px
+        self._roi_y2_edit.setMaximumWidth(70)
+        roi_row2.addWidget(self._roi_y2_edit)
         roi_layout.addLayout(roi_row2)
 
         roi_row3 = QHBoxLayout()
@@ -444,6 +444,13 @@ class LumeneraLiveWindow(QWidget):
             return
 
         self._log_message(f"Camera {self._fixed_index} activated")
+
+        sensor_w, sensor_h = self._cam.get_sensor_size()
+        self._roi_x1_edit.setText("0")
+        self._roi_x2_edit.setText(str(sensor_w))
+        self._roi_y1_edit.setText("0")
+        self._roi_y2_edit.setText(str(sensor_h))
+        self._roi_status_label.setText(f"ROI: full sensor ({sensor_w}x{sensor_h})")
 
         key_name = f"camera:lumenera:{self._camera_name.lower()}"
         key_index = f"camera:lumenera:index:{self._fixed_index}"
@@ -717,9 +724,6 @@ class LumeneraLiveWindow(QWidget):
     # Image display
     # -------------------------------------------------------------------------
 
-    def _px_per_mm(self) -> float:
-        return 1.0 / (PIXEL_SIZE_M * 1e3)
-
     def _update_image(self, image: np.ndarray):
         if not isinstance(image, np.ndarray):
             self._log_message("Invalid image received")
@@ -844,29 +848,25 @@ class LumeneraLiveWindow(QWidget):
         self._canvas.draw_idle()
 
     def _apply_roi(self):
-        """Apply hardware ROI to the camera using mm values from the UI."""
+        """Apply hardware ROI to the camera using pixel coordinates from the UI."""
         if self._cam is None:
             QMessageBox.critical(self, "Error", "Camera not activated.")
             return
 
         try:
-            x_mm = float(self._roi_x_edit.text())
-            y_mm = float(self._roi_y_edit.text())
-            w_mm = float(self._roi_w_edit.text())
-            h_mm = float(self._roi_h_edit.text())
+            x1 = int(self._roi_x1_edit.text())
+            x2 = int(self._roi_x2_edit.text())
+            y1 = int(self._roi_y1_edit.text())
+            y2 = int(self._roi_y2_edit.text())
         except ValueError:
-            QMessageBox.critical(self, "Error", "ROI values must be numeric (mm).")
+            QMessageBox.critical(self, "Error", "ROI values must be integer pixel coordinates.")
             return
 
-        if w_mm <= 0 or h_mm <= 0 or x_mm < 0 or y_mm < 0:
-            QMessageBox.critical(self, "Error", "ROI offsets must be >= 0 and dimensions > 0.")
+        if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
+            QMessageBox.critical(self, "Error", "ROI must satisfy 0 <= X1 < X2 and 0 <= Y1 < Y2.")
             return
 
-        px_per_mm = self._px_per_mm()
-        x_px = int(round(x_mm * px_per_mm))
-        y_px = int(round(y_mm * px_per_mm))
-        w_px = int(round(w_mm * px_per_mm))
-        h_px = int(round(h_mm * px_per_mm))
+        x_px, y_px, w_px, h_px = x1, y1, x2 - x1, y2 - y1
 
         was_live = self._live_running
         if was_live:
@@ -883,11 +883,10 @@ class LumeneraLiveWindow(QWidget):
 
         # The camera may have aligned the ROI to a multiple — read back the actual values
         ax, ay, aw, ah = self._cam.current_roi
-        mm_per_px = PIXEL_SIZE_M * 1e3
-        self._roi_x_edit.setText(f"{ax * mm_per_px:.3f}")
-        self._roi_y_edit.setText(f"{ay * mm_per_px:.3f}")
-        self._roi_w_edit.setText(f"{aw * mm_per_px:.3f}")
-        self._roi_h_edit.setText(f"{ah * mm_per_px:.3f}")
+        self._roi_x1_edit.setText(str(ax))
+        self._roi_x2_edit.setText(str(ax + aw))
+        self._roi_y1_edit.setText(str(ay))
+        self._roi_y2_edit.setText(str(ay + ah))
         self._roi_status_label.setText(
             f"ROI: ({ax}, {ay}, {aw}x{ah}) px @ {self._cam._framerate:.1f} fps"
         )
@@ -932,11 +931,10 @@ class LumeneraLiveWindow(QWidget):
             return
 
         sensor_w, sensor_h = self._cam.get_sensor_size()
-        mm_per_px = PIXEL_SIZE_M * 1e3
-        self._roi_x_edit.setText("0")
-        self._roi_y_edit.setText("0")
-        self._roi_w_edit.setText(f"{sensor_w * mm_per_px:.3f}")
-        self._roi_h_edit.setText(f"{sensor_h * mm_per_px:.3f}")
+        self._roi_x1_edit.setText("0")
+        self._roi_x2_edit.setText(str(sensor_w))
+        self._roi_y1_edit.setText("0")
+        self._roi_y2_edit.setText(str(sensor_h))
         self._roi_status_label.setText(f"ROI: full sensor ({sensor_w}x{sensor_h})")
         self._log_message("ROI reset to full sensor")
 
