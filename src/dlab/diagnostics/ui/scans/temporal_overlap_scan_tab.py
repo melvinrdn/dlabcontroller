@@ -30,6 +30,7 @@ from dlab.boot import ROOT, get_config
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.paths_utils import data_dir
+from dlab.diagnostics.ui.scans.scan_utils import confirm_large_scan, generate_positions
 
 
 # -----------------------------------------------------------------------------
@@ -321,7 +322,9 @@ class TOverlapWorker(QObject):
                 wl = np.asarray(wl, float).ravel()
                 y_raw = np.asarray(counts, float).ravel()
                 if self.use_processed and hasattr(ctrl, "process_counts"):
-                    _ = ctrl.process_counts(wl, y_raw)
+                    y_for_display = np.asarray(ctrl.process_counts(wl, y_raw), float).ravel()
+                else:
+                    y_for_display = y_raw
             except Exception as e:
                 self._emit(f"Acquisition failed @ {pos:.3f}: {e}")
                 self.progress.emit(i, n)
@@ -329,14 +332,14 @@ class TOverlapWorker(QObject):
 
             if wl_ref is None:
                 wl_ref = wl.copy()
-                y_disp = y_raw
+                y_disp = y_for_display
                 wl_disp = wl
             else:
                 if wl.shape != wl_ref.shape or np.max(np.abs(wl - wl_ref)) > 1e-9:
-                    y_disp = np.interp(wl_ref, wl, y_raw)
+                    y_disp = np.interp(wl_ref, wl, y_for_display)
                     wl_disp = wl_ref
                 else:
-                    y_disp = y_raw
+                    y_disp = y_for_display
                     wl_disp = wl
 
             try:
@@ -499,6 +502,10 @@ class TOverlapTab(QWidget):
         self._comment_edit = QLineEdit("")
         layout.addWidget(self._comment_edit, 1)
 
+        self._estimate_btn = QPushButton("Estimate Scan Time")
+        self._estimate_btn.clicked.connect(self._on_estimate_time)
+        layout.addWidget(self._estimate_btn)
+
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_start)
         layout.addWidget(self._start_btn)
@@ -544,25 +551,42 @@ class TOverlapTab(QWidget):
             self._spec_combo.addItem(k)
 
     # -------------------------------------------------------------------------
-    # Scan control
+    # Scan time estimate
     # -------------------------------------------------------------------------
 
-    @staticmethod
-    def _linspace_positions(a0: float, a1: float, step: float) -> list[float]:
-        """Generate list of positions for the scan."""
-        if step <= 0:
-            raise ValueError("Step must be > 0.")
-        if a1 >= a0:
-            nsteps = int(np.floor((a1 - a0) / step))
-            pos = [a0 + i * step for i in range(nsteps + 1)]
-            if pos[-1] < a1 - 1e-12:
-                pos.append(a1)
-        else:
-            nsteps = int(np.floor((a0 - a1) / step))
-            pos = [a0 - i * step for i in range(nsteps + 1)]
-            if pos[-1] > a1 + 1e-12:
-                pos.append(a1)
-        return pos
+    def _on_estimate_time(self) -> None:
+        try:
+            a0 = float(self._start_sb.value())
+            a1 = float(self._end_sb.value())
+            step = float(self._step_sb.value())
+            positions = generate_positions(a0, a1, step)
+        except Exception as e:
+            QMessageBox.critical(self, "Invalid parameters", str(e))
+            return
+
+        settle = float(self._settle_sb.value())
+        int_s = float(self._int_sb.value()) / 1000.0
+        avg = int(self._avg_sb.value())
+        time_per_point = settle + int_s * avg
+        total = len(positions) * time_per_point
+        hours = int(total // 3600)
+        minutes = int((total % 3600) // 60)
+        seconds = int(total % 60)
+
+        msg = (
+            f"Positions: {len(positions)}\n\n"
+            f"Settle per point: {settle:.2f} s\n"
+            f"Integration x averages: {int_s * avg:.2f} s\n"
+            f"Min per point: {time_per_point:.2f} s\n\n"
+            f"Estimated MINIMUM total: {hours}h {minutes}min {seconds}s\n\n"
+            f"(Lower bound — excludes stage transit time.)"
+        )
+        QMessageBox.information(self, "Scan Time Estimate", msg)
+        self._log_message(f"Estimated minimum scan time: {hours}h {minutes}min {seconds}s")
+
+    # -------------------------------------------------------------------------
+    # Scan control
+    # -------------------------------------------------------------------------
 
     def _on_start(self) -> None:
         try:
@@ -574,7 +598,7 @@ class TOverlapTab(QWidget):
             a0 = float(self._start_sb.value())
             a1 = float(self._end_sb.value())
             step = float(self._step_sb.value())
-            positions = self._linspace_positions(a0, a1, step)
+            positions = generate_positions(a0, a1, step)
 
             settle = float(self._settle_sb.value())
             int_ms = float(self._int_sb.value())
@@ -585,6 +609,9 @@ class TOverlapTab(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "Invalid parameters", str(e))
+            return
+
+        if not confirm_large_scan(self, len(positions), 1):
             return
 
         self._thread = QThread(self)
