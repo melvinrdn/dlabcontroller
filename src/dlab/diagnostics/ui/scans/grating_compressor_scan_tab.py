@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
-from PIL import Image, PngImagePlugin
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, Qt
 from PyQt5.QtWidgets import (
@@ -32,23 +31,11 @@ from matplotlib.figure import Figure
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.paths_utils import data_dir
-
-
-# -----------------------------------------------------------------------------
-# Helper functions
-# -----------------------------------------------------------------------------
-
-
-def _save_png_with_meta(folder: Path, filename: str, frame_u16: np.ndarray, meta: dict) -> Path:
-    """Save a 16-bit PNG image with metadata."""
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / filename
-    img = Image.fromarray(frame_u16, mode="I;16")
-    pnginfo = PngImagePlugin.PngInfo()
-    for k, v in meta.items():
-        pnginfo.add_text(str(k), str(v))
-    img.save(path.as_posix(), format="PNG", pnginfo=pnginfo)
-    return path
+from dlab.diagnostics.ui.scans.scan_utils import (
+    confirm_large_scan,
+    generate_positions,
+    save_png_with_meta,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -214,7 +201,7 @@ class GCWorker(QObject):
                 self._best_pos = float(pos)
 
             try:
-                _save_png_with_meta(
+                save_png_with_meta(
                     cam_day,
                     cam_fn,
                     frame_u16,
@@ -270,7 +257,7 @@ class GCWorker(QObject):
                 cam_day = root / f"{now:%Y-%m-%d}" / cam_name
                 cam_fn = f"{cam_name}_{tag}_{ts_ms}.png"
                 try:
-                    _save_png_with_meta(
+                    save_png_with_meta(
                         cam_day,
                         cam_fn,
                         frame_u16,
@@ -484,6 +471,10 @@ class GCScanTab(QWidget):
     def _create_controls_row(self) -> QHBoxLayout:
         layout = QHBoxLayout()
 
+        self._estimate_btn = QPushButton("Estimate Scan Time")
+        self._estimate_btn.clicked.connect(self._on_estimate_time)
+        layout.addWidget(self._estimate_btn)
+
         self._start_btn = QPushButton("Start")
         self._start_btn.clicked.connect(self._on_start)
         layout.addWidget(self._start_btn)
@@ -525,24 +516,42 @@ class GCScanTab(QWidget):
             self._cam_combo.addItem(k)
 
     # -------------------------------------------------------------------------
-    # Scan control
+    # Scan time estimate
     # -------------------------------------------------------------------------
 
-    def _positions(self, a0: float, a1: float, step: float) -> List[float]:
-        """Generate list of positions for the scan."""
-        if step <= 0:
-            raise ValueError("Step must be > 0.")
-        if a1 >= a0:
-            n = int(np.floor((a1 - a0) / step))
-            pos = [a0 + i * step for i in range(n + 1)]
-            if pos[-1] < a1 - 1e-12:
-                pos.append(a1)
-        else:
-            n = int(np.floor((a0 - a1) / step))
-            pos = [a0 - i * step for i in range(n + 1)]
-            if pos[-1] > a1 + 1e-12:
-                pos.append(a1)
-        return pos
+    def _on_estimate_time(self) -> None:
+        try:
+            start = float(self._start_sb.value())
+            end = float(self._end_sb.value())
+            step = float(self._step_sb.value())
+            pos = generate_positions(start, end, step)
+        except Exception as e:
+            QMessageBox.critical(self, "Invalid parameters", str(e))
+            return
+
+        settle = float(self._settle_sb.value())
+        exposure_s = float(self._exp_sb.value()) / 1e6
+        avg = int(self._avg_sb.value())
+        time_per_point = settle + exposure_s * avg
+        total = len(pos) * time_per_point
+        hours = int(total // 3600)
+        minutes = int((total % 3600) // 60)
+        seconds = int(total % 60)
+
+        msg = (
+            f"Positions: {len(pos)}\n\n"
+            f"Settle per point: {settle:.2f} s\n"
+            f"Exposure x averages: {exposure_s * avg:.2f} s\n"
+            f"Min per point: {time_per_point:.2f} s\n\n"
+            f"Estimated MINIMUM total: {hours}h {minutes}min {seconds}s\n\n"
+            f"(Lower bound — excludes stage transit time.)"
+        )
+        QMessageBox.information(self, "Scan Time Estimate", msg)
+        self._log_message(f"Estimated minimum scan time: {hours}h {minutes}min {seconds}s")
+
+    # -------------------------------------------------------------------------
+    # Scan control
+    # -------------------------------------------------------------------------
 
     def _on_start(self) -> None:
         try:
@@ -559,7 +568,7 @@ class GCScanTab(QWidget):
             start = float(self._start_sb.value())
             end = float(self._end_sb.value())
             step = float(self._step_sb.value())
-            pos = self._positions(start, end, step)
+            pos = generate_positions(start, end, step)
 
             settle = float(self._settle_sb.value())
             expo = int(self._exp_sb.value())
@@ -569,6 +578,9 @@ class GCScanTab(QWidget):
 
         except Exception as e:
             QMessageBox.critical(self, "Invalid parameters", str(e))
+            return
+
+        if not confirm_large_scan(self, len(pos), 1):
             return
 
         # Create thread/worker
@@ -623,17 +635,8 @@ class GCScanTab(QWidget):
             self._log_message("Scan finished with errors or aborted.")
             self._last_scan_log_path = None
 
-        # Optional background capture after scan
-        if self._bg_checkbox.isChecked() and self._last_scan_log_path:
-            reply = QMessageBox.information(
-                self,
-                "Background",
-                "Block the beam, then click OK to record one background image.",
-                QMessageBox.Ok | QMessageBox.Cancel,
-                QMessageBox.Ok,
-            )
-            if reply == QMessageBox.Ok and (not self._worker or not self._worker.abort):
-                self._capture_background()
+        do_background = bool(self._bg_checkbox.isChecked() and self._last_scan_log_path)
+        skip_background = bool(self._worker and self._worker.abort)
 
         self._abort_btn.setEnabled(False)
         self._start_btn.setEnabled(True)
@@ -643,6 +646,20 @@ class GCScanTab(QWidget):
         self._thread = None
         self._worker = None
 
+        # Optional background capture after scan — routed through the same
+        # tracked self._thread/self._worker as the main scan so Abort and the
+        # scan-window close guard both see it as a running scan.
+        if do_background and not skip_background:
+            reply = QMessageBox.information(
+                self,
+                "Background",
+                "Block the beam, then click OK to record one background image.",
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Ok,
+            )
+            if reply == QMessageBox.Ok:
+                self._capture_background()
+
     def _capture_background(self) -> None:
         """Capture background image after scan."""
         try:
@@ -650,7 +667,8 @@ class GCScanTab(QWidget):
             stage_key = "stage:zaber:grating_compressor"
             self._log_message("Recording background…")
 
-            worker = GCWorker(
+            self._thread = QThread(self)
+            self._worker = GCWorker(
                 stage_key=stage_key,
                 andor_key=cam_key,
                 positions=[],
@@ -662,22 +680,28 @@ class GCScanTab(QWidget):
                 do_background=True,
                 existing_scan_log=self._last_scan_log_path,
             )
+            self._worker.moveToThread(self._thread)
+            self._thread.started.connect(self._worker.run)
+            self._worker.log.connect(self._log_message)
+            self._worker.finished.connect(self._on_background_finished)
+            self._thread.finished.connect(self._thread.deleteLater)
 
-            thread = QThread(self)
-            worker.moveToThread(thread)
-            thread.started.connect(worker.run)
-            worker.log.connect(self._log_message)
-
-            def _bg_done(_path: str) -> None:
-                self._log_message("Background captured.")
-                thread.quit()
-                thread.wait()
-
-            worker.finished.connect(_bg_done)
-            thread.start()
+            self._start_btn.setEnabled(False)
+            self._abort_btn.setEnabled(True)
+            self._thread.start()
 
         except Exception as e:
             self._log_message(f"Background failed: {e}")
+
+    def _on_background_finished(self, _path: str) -> None:
+        self._log_message("Background captured.")
+        self._abort_btn.setEnabled(False)
+        self._start_btn.setEnabled(True)
+        if self._thread and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait()
+        self._thread = None
+        self._worker = None
 
     # -------------------------------------------------------------------------
     # Live view
