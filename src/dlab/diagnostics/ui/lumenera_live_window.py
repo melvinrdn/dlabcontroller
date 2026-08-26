@@ -10,8 +10,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.widgets import RectangleSelector
-from matplotlib.patches import Rectangle
 from PIL import Image, PngImagePlugin
 
 from PyQt5.QtWidgets import (
@@ -30,9 +28,9 @@ from dlab.hardware.wrappers.lumenera_controller import (
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.paths_utils import data_dir
 from dlab.utils.log_panel import LogPanel
-from dlab.utils.yaml_utils import read_yaml, write_yaml
 from dlab.utils.colormaps import COLORMAPS, resolve_cmap
-from dlab.boot import ROOT
+from dlab.diagnostics.ui.dual_crosshair_mixin import DualCrosshairMixin
+from dlab.diagnostics.ui.colorbar_controls_mixin import ColorbarControlsMixin
 
 PIXEL_SIZE_M = 2.74e-6
 SATURATION_VALUE = 65520  # 12-bit ADC (4095) left-shifted 4 bits into the 16-bit container
@@ -40,14 +38,11 @@ MIN_INTERVAL_US = 500_000
 DEFAULT_DARK_AVERAGES = 32
 
 
-def _config_path() -> Path:
-    return ROOT / "config" / "config.yaml"
-
-
 class _LiveCaptureThread(QThread):
     """Background thread for continuous image capture."""
 
     image_signal = pyqtSignal(np.ndarray)
+    error = pyqtSignal(str)
 
     def __init__(self, cam: LumeneraController, exposure_us: int, gain: int, interval_us: int, cap_lock=None):
         super().__init__()
@@ -81,11 +76,12 @@ class _LiveCaptureThread(QThread):
                     frame = self._cam.capture_single(exp, g)
                 self.image_signal.emit(frame)
                 time.sleep(wait_s)
-            except Exception:
+            except Exception as e:
+                self.error.emit(str(e))
                 break
 
 
-class LumeneraLiveWindow(QWidget):
+class LumeneraLiveWindow(DualCrosshairMixin, ColorbarControlsMixin, QWidget):
     """Live view window for Lumenera/Ophir SP402S camera."""
 
     closed = pyqtSignal()
@@ -98,6 +94,9 @@ class LumeneraLiveWindow(QWidget):
 
         self._camera_name = camera_name
         self._fixed_index = fixed_index
+        self._pixel_size_m = PIXEL_SIZE_M
+        self._crosshair_config_prefix = "lumenera"
+        self._sensor_max_value = SATURATION_VALUE
         self._log = log_panel
 
         self.setWindowTitle(f"LumeneraLiveWindow - {camera_name}")
@@ -503,6 +502,7 @@ class LumeneraLiveWindow(QWidget):
             self._cam, exp_us, gain, interval_us, cap_lock=self._capture_lock
         )
         self._capture_thread.image_signal.connect(self._update_image)
+        self._capture_thread.error.connect(self._on_capture_thread_error, Qt.QueuedConnection)
         self._capture_thread.start()
         self._live_running = True
 
@@ -513,13 +513,19 @@ class LumeneraLiveWindow(QWidget):
     def _stop_capture(self):
         if self._capture_thread:
             self._capture_thread.stop()
-            self._capture_thread.wait()
+            if not self._capture_thread.wait(2000):
+                self._log_message("Capture thread did not stop cleanly.")
             self._capture_thread = None
             self._live_running = False
 
         self._log_message("Live capture stopped.")
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
+
+    def _on_capture_thread_error(self, err: str):
+        self._log_message(f"Live capture thread error: {err}")
+        QMessageBox.critical(self, "Acquisition error", f"Live capture stopped: {err}")
+        self._stop_capture()
 
     def _update_interval_field(self, exp_us: int) -> int:
         interval_us = exp_us if exp_us >= MIN_INTERVAL_US else MIN_INTERVAL_US
@@ -610,6 +616,8 @@ class LumeneraLiveWindow(QWidget):
             self._log_message(f"Dark acquisition error: {e}")
         finally:
             self._acquire_dark_btn.setEnabled(True)
+            if was_live:
+                self._start_capture()
 
     def _clear_dark(self):
         with self._dark_lock:
@@ -782,48 +790,6 @@ class LumeneraLiveWindow(QWidget):
     # Colorbar controls
     # -------------------------------------------------------------------------
 
-    def _on_fix_cbar(self, checked: bool):
-        self._fix_cbar = checked
-        if checked:
-            try:
-                self._fixed_vmax = float(self._fix_value_edit.text())
-                self._log_message(f"Colorbar max set to {self._fixed_vmax:.1f}")
-            except ValueError:
-                self._fixed_vmax = None
-                self._fix_cbar_cb.setChecked(False)
-                self._log_message("Invalid colorbar max")
-        else:
-            self._fixed_vmax = None
-            self._log_message("Colorbar auto scale")
-
-    def _on_fix_value_changed(self, text: str):
-        if not self._fix_cbar_cb.isChecked() or not self._image_artist:
-            return
-        try:
-            self._fixed_vmax = float(text)
-            vmin, _ = self._image_artist.get_clim()
-            self._image_artist.set_clim(vmin, self._fixed_vmax)
-            if self._cbar:
-                self._cbar.update_normal(self._image_artist)
-            self._canvas.draw_idle()
-        except ValueError:
-            pass
-
-    def _on_set_sensor_max(self):
-        self._fix_value_edit.setText(str(SATURATION_VALUE))
-        if not self._fix_cbar_cb.isChecked():
-            self._fix_cbar_cb.setChecked(True)
-
-    def _on_cmap_changed(self, key: str):
-        self._cmap_key = key
-        self._cmap = resolve_cmap(key)
-        if self._image_artist is not None:
-            self._image_artist.set_cmap(self._cmap)
-            if self._cbar:
-                self._cbar.update_normal(self._image_artist)
-            self._canvas.draw_idle()
-        self._log_message(f"Colormap set to {key}")
-
     # -------------------------------------------------------------------------
     # ROI (hardware)
     # -------------------------------------------------------------------------
@@ -953,208 +919,6 @@ class LumeneraLiveWindow(QWidget):
 
         if was_live:
             self._start_capture()
-
-    # -------------------------------------------------------------------------
-    # Crosshairs
-    # -------------------------------------------------------------------------
-
-    def _ensure_crosshair_artists(self):
-        if self._ch_h is None or self._ch_v is None:
-            self._ch_h = self._ax.axhline(0, linestyle="--", linewidth=1.2, color="r")
-            self._ch_v = self._ax.axvline(0, linestyle="--", linewidth=1.2, color="r")
-            self._ch_h.set_visible(self._crosshair_visible)
-            self._ch_v.set_visible(self._crosshair_visible)
-
-    def _ensure_crosshair2_artists(self):
-        if self._ch2_h is None or self._ch2_v is None:
-            self._ch2_h = self._ax.axhline(0, linestyle="-.", linewidth=1.2, color="green")
-            self._ch2_v = self._ax.axvline(0, linestyle="-.", linewidth=1.2, color="green")
-            self._ch2_h.set_visible(self._crosshair2_visible)
-            self._ch2_v.set_visible(self._crosshair2_visible)
-
-    def _toggle_crosshair(self):
-        if not self._crosshair_visible and self._crosshair_pos_mm is None:
-            with self._frame_lock:
-                if self._last_frame is not None:
-                    h, w = self._last_frame.shape
-                    mm_per_px = PIXEL_SIZE_M * 1e3
-                    cx = (w * mm_per_px) / 2.0
-                    cy = (h * mm_per_px) / 2.0
-                    self._crosshair_pos_mm = (cx, cy)
-                else:
-                    self._crosshair_pos_mm = (0.0, 0.0)
-
-        self._crosshair_visible = not self._crosshair_visible
-        self._ensure_crosshair_artists()
-        self._refresh_crosshair()
-        self._log_message(f"Crosshair 1 {'shown' if self._crosshair_visible else 'hidden'}")
-
-    def _toggle_crosshair2(self):
-        if not self._crosshair2_visible and self._crosshair2_pos_mm is None:
-            with self._frame_lock:
-                if self._last_frame is not None:
-                    h, w = self._last_frame.shape
-                    mm_per_px = PIXEL_SIZE_M * 1e3
-                    cx = (w * mm_per_px) / 2.0
-                    cy = (h * mm_per_px) / 2.0
-                    self._crosshair2_pos_mm = (cx, cy)
-                else:
-                    self._crosshair2_pos_mm = (0.0, 0.0)
-
-        self._crosshair2_visible = not self._crosshair2_visible
-        self._ensure_crosshair2_artists()
-        self._refresh_crosshair2()
-        self._log_message(f"Crosshair 2 {'shown' if self._crosshair2_visible else 'hidden'}")
-
-    def _toggle_lock_manual(self):
-        if not self._crosshair_visible:
-            return
-        self._crosshair_locked = not self._crosshair_locked
-        self._refresh_crosshair()
-
-    def _toggle_lock_manual2(self):
-        if not self._crosshair2_visible:
-            return
-        self._crosshair2_locked = not self._crosshair2_locked
-        self._refresh_crosshair2()
-
-    def _refresh_crosshair(self):
-        self._ensure_crosshair_artists()
-        vis = bool(self._crosshair_visible)
-        self._ch_h.set_visible(vis)
-        self._ch_v.set_visible(vis)
-        if vis and self._crosshair_pos_mm is not None:
-            x_mm, y_mm = self._crosshair_pos_mm
-            self._ch_h.set_ydata([y_mm, y_mm])
-            self._ch_v.set_xdata([x_mm, x_mm])
-        self._canvas.draw_idle()
-
-    def _refresh_crosshair2(self):
-        self._ensure_crosshair2_artists()
-        vis = bool(self._crosshair2_visible)
-        self._ch2_h.set_visible(vis)
-        self._ch2_v.set_visible(vis)
-        if vis and self._crosshair2_pos_mm is not None:
-            x_mm, y_mm = self._crosshair2_pos_mm
-            self._ch2_h.set_ydata([y_mm, y_mm])
-            self._ch2_v.set_xdata([x_mm, x_mm])
-        self._canvas.draw_idle()
-
-    def _save_crosshair_position(self):
-        if not self._crosshair_visible or self._crosshair_pos_mm is None:
-            QMessageBox.warning(self, "Crosshair", "Crosshair 1 must be visible to save its position.")
-            return
-
-        path = _config_path()
-        data = read_yaml(path)
-        cam_key = f"lumenera_{self._fixed_index}"
-        node = data.get("crosshair", {}) if isinstance(data.get("crosshair"), dict) else {}
-        node[cam_key] = {
-            "x_mm": float(self._crosshair_pos_mm[0]),
-            "y_mm": float(self._crosshair_pos_mm[1]),
-        }
-        data["crosshair"] = node
-
-        try:
-            write_yaml(path, data)
-            self._log_message(f"Crosshair 1 saved: ({self._crosshair_pos_mm[0]:.3f}, {self._crosshair_pos_mm[1]:.3f}) mm")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save crosshair 1: {e}")
-
-    def _save_crosshair2_position(self):
-        if not self._crosshair2_visible or self._crosshair2_pos_mm is None:
-            QMessageBox.warning(self, "Crosshair 2", "Crosshair 2 must be visible to save its position.")
-            return
-
-        path = _config_path()
-        data = read_yaml(path)
-        cam_key = f"lumenera_{self._fixed_index}"
-        node = data.get("crosshair2", {}) if isinstance(data.get("crosshair2"), dict) else {}
-        node[cam_key] = {
-            "x_mm": float(self._crosshair2_pos_mm[0]),
-            "y_mm": float(self._crosshair2_pos_mm[1]),
-        }
-        data["crosshair2"] = node
-
-        try:
-            write_yaml(path, data)
-            self._log_message(f"Crosshair 2 saved: ({self._crosshair2_pos_mm[0]:.3f}, {self._crosshair2_pos_mm[1]:.3f}) mm")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save crosshair 2: {e}")
-
-    def _goto_saved_crosshair(self):
-        data = read_yaml(_config_path())
-        cam_key = f"lumenera_{self._fixed_index}"
-        pos = ((data.get("crosshair") or {}).get(cam_key)) or {}
-
-        if "x_mm" not in pos or "y_mm" not in pos:
-            QMessageBox.information(self, "Crosshair", "No saved position found for crosshair 1 on this camera.")
-            return
-
-        try:
-            x_mm = float(pos["x_mm"])
-            y_mm = float(pos["y_mm"])
-        except Exception:
-            QMessageBox.critical(self, "Crosshair", "Saved position for crosshair 1 is invalid.")
-            return
-
-        self._crosshair_pos_mm = (x_mm, y_mm)
-        if not self._crosshair_visible:
-            self._crosshair_visible = True
-        self._refresh_crosshair()
-        self._log_message(f"Crosshair 1 loaded: ({x_mm:.3f}, {y_mm:.3f}) mm")
-
-    def _goto_saved_crosshair2(self):
-        data = read_yaml(_config_path())
-        cam_key = f"lumenera_{self._fixed_index}"
-        pos = ((data.get("crosshair2") or {}).get(cam_key)) or {}
-
-        if "x_mm" not in pos or "y_mm" not in pos:
-            QMessageBox.information(self, "Crosshair 2", "No saved position found for crosshair 2 on this camera.")
-            return
-
-        try:
-            x_mm = float(pos["x_mm"])
-            y_mm = float(pos["y_mm"])
-        except Exception:
-            QMessageBox.critical(self, "Crosshair 2", "Saved position for crosshair 2 is invalid.")
-            return
-
-        self._crosshair2_pos_mm = (x_mm, y_mm)
-        if not self._crosshair2_visible:
-            self._crosshair2_visible = True
-        self._refresh_crosshair2()
-        self._log_message(f"Crosshair 2 loaded: ({x_mm:.3f}, {y_mm:.3f}) mm")
-
-    # -------------------------------------------------------------------------
-    # Mouse events
-    # -------------------------------------------------------------------------
-
-    def _on_mouse_move(self, event):
-        if event.xdata is None or event.ydata is None:
-            return
-        if self._crosshair_visible and not self._crosshair_locked:
-            self._crosshair_pos_mm = (float(event.xdata), float(event.ydata))
-            self._refresh_crosshair()
-        if self._crosshair2_visible and not self._crosshair2_locked:
-            self._crosshair2_pos_mm = (float(event.xdata), float(event.ydata))
-            self._refresh_crosshair2()
-
-    def _on_mouse_press(self, event):
-        if event.xdata is None or event.ydata is None:
-            return
-
-        if event.button == 3 and self._crosshair_visible:
-            self._crosshair_locked = not self._crosshair_locked
-            if self._crosshair_locked:
-                self._crosshair_pos_mm = (float(event.xdata), float(event.ydata))
-            self._refresh_crosshair()
-
-        elif event.button == 2 and self._crosshair2_visible:
-            self._crosshair2_locked = not self._crosshair2_locked
-            if self._crosshair2_locked:
-                self._crosshair2_pos_mm = (float(event.xdata), float(event.ydata))
-            self._refresh_crosshair2()
 
     # -------------------------------------------------------------------------
     # Save frames

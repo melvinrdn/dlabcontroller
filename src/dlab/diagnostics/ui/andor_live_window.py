@@ -70,14 +70,18 @@ class _LiveCaptureThread(QThread):
 
     image_signal = pyqtSignal(np.ndarray)
     fps_signal = pyqtSignal(float)
+    error = pyqtSignal(str)
 
-    def __init__(self, controller: AndorController, exposure: int, interval_ms: int):
+    def __init__(
+        self, controller: AndorController, exposure: int, interval_ms: int, cap_lock=None
+    ):
         super().__init__()
         self._controller = controller
         self._exposure = exposure
         self._interval_s = interval_ms / 1000.0
         self._running = True
         self._lock = threading.Lock()
+        self._cap_lock = cap_lock
         self._frame_times: list[float] = []
 
     def update_parameters(self, exposure: int, interval_ms: int):
@@ -95,11 +99,14 @@ class _LiveCaptureThread(QThread):
                     exp = self._exposure
                     interval = self._interval_s
 
-                image = self._controller.capture_single(exp)
+                lock = self._cap_lock or threading.Lock()
+                with lock:
+                    image = self._controller.capture_single(exp)
                 self.image_signal.emit(image)
                 self._update_fps()
                 time.sleep(interval)
-            except Exception:
+            except Exception as e:
+                self.error.emit(str(e))
                 break
 
     def _update_fps(self):
@@ -130,6 +137,7 @@ class AndorLiveWindow(QWidget):
         self._log = log_panel
         self._cam: AndorController | None = None
         self._capture_thread: _LiveCaptureThread | None = None
+        self._capture_lock = threading.Lock()
         self._last_frame: np.ndarray | None = None
         self._frame_lock = threading.Lock()
 
@@ -222,7 +230,7 @@ class AndorLiveWindow(QWidget):
         self._fix_cbar_cb = QCheckBox("Fix Colorbar Max")
         param_layout.addWidget(self._fix_cbar_cb)
         self._fix_value_edit = QLineEdit("10000")
-        self._fix_value_edit.setValidator(QIntValidator(0, 1_000_000_000, self))
+        self._fix_value_edit.setValidator(QIntValidator(0, SATURATION_VALUE, self))
         self._fix_value_edit.setEnabled(False)
         param_layout.addWidget(self._fix_value_edit)
         self._fix_cbar_cb.toggled.connect(self._fix_value_edit.setEnabled)
@@ -456,9 +464,12 @@ class AndorLiveWindow(QWidget):
             QMessageBox.critical(self, "Error", "Invalid parameter values.")
             return
 
-        self._capture_thread = _LiveCaptureThread(self._cam, exposure, interval)
+        self._capture_thread = _LiveCaptureThread(
+            self._cam, exposure, interval, cap_lock=self._capture_lock
+        )
         self._capture_thread.image_signal.connect(self._update_image)
         self._capture_thread.fps_signal.connect(self._update_fps)
+        self._capture_thread.error.connect(self._on_capture_thread_error, Qt.QueuedConnection)
         self._capture_thread.start()
 
         self._log_message("Live capture started.")
@@ -468,13 +479,19 @@ class AndorLiveWindow(QWidget):
     def _stop_capture(self):
         if self._capture_thread:
             self._capture_thread.stop()
-            self._capture_thread.wait()
+            if not self._capture_thread.wait(2000):
+                self._log_message("Capture thread did not stop cleanly.")
             self._capture_thread = None
 
         self._log_message("Live capture stopped.")
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._fps_label.setText("0.0")
+
+    def _on_capture_thread_error(self, err: str):
+        self._log_message(f"Live capture thread error: {err}")
+        QMessageBox.critical(self, "Acquisition error", f"Live capture stopped: {err}")
+        self._stop_capture()
 
     def _on_params_changed(self):
         try:
@@ -948,11 +965,11 @@ class AndorLiveWindow(QWidget):
             try:
                 ts = datetime.datetime.now()
                 with self._frame_lock:
-                    frame = (
-                        self._cam.capture_single(exposure)
-                        if self._cam
-                        else self._last_frame
-                    )
+                    if self._cam:
+                        with self._capture_lock:
+                            frame = self._cam.capture_single(exposure)
+                    else:
+                        frame = self._last_frame
 
                 if frame is None:
                     raise RuntimeError("No frame captured.")
@@ -996,7 +1013,8 @@ class AndorLiveWindow(QWidget):
         acc = None
 
         for _ in range(n):
-            f = self._cam.capture_single(exp).astype(np.float64)
+            with self._capture_lock:
+                f = self._cam.capture_single(exp).astype(np.float64)
             acc = f if acc is None else (acc + f)
         avg = acc / n
 
