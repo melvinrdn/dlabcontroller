@@ -263,11 +263,11 @@ class PiezoJenaBlock(QGroupBox):
             return
 
         try:
-            cur = (
-                float(self._cur_pos_edit.text())
-                if self._cur_pos_edit.text() not in ("", "—")
-                else 0.0
-            )
+            try:
+                cur = self._stage.get_position()
+            except Exception as e:
+                self._log_message(f"Position read failed, assuming 0.0: {e}")
+                cur = 0.0
             tgt = cur + sign * step
             tgt = max(self._range_min, min(self._range_max, tgt))
 

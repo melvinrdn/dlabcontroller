@@ -275,9 +275,10 @@ class GratingCompressorWindow(QWidget):
 
         try:
             val = float(t)
+            val = max(self._range_min, min(self._range_max, val))
             self._stage.move_to(val, blocking=False)
             self._log_message(f"Move to {val:.3f} mm …")
-            self._poll_timer.start()
+            self._poller.start()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Move failed: {e}")
             self._log_message(f"Move failed: {e}")

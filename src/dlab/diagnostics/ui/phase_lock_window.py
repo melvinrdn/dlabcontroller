@@ -825,6 +825,12 @@ class AvaspecPhaseLockWindow(QWidget):
             f"start {thread.current_v:.1f} V)"
         )
 
+        # The fresh thread always starts disabled; drop a stale LOCK checkbox
+        # instead of showing "locked" while nothing is actually driving the stage.
+        if self._lock_checkbox.isChecked():
+            self._lock_checkbox.setChecked(False)
+            self._log_message("LOCK disabled: stage reconnected, re-enable manually if needed.")
+
     # -------------------------------------------------------------------------
     # Parameter updates
     # -------------------------------------------------------------------------
