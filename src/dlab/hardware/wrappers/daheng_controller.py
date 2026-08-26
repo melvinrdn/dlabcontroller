@@ -5,6 +5,7 @@ import logging
 import numpy as np
 
 from dlab.hardware.drivers import gxipy_driver as gx
+from dlab.hardware.wrappers.clamp_utils import clamp_and_warn
 
 
 _log = logging.getLogger(__name__)
@@ -87,32 +88,15 @@ class DahengController:
             self.current_gain = None
 
     def _clamp_exposure(self, us: int) -> int:
-        if us < MIN_EXPOSURE_US or us > MAX_EXPOSURE_US:
-            clamped = max(MIN_EXPOSURE_US, min(MAX_EXPOSURE_US, us))
-            _log.warning(
-                "Daheng[%s] exposure %dus out of range [%d..%d]; clamped to %dus",
-                self.index,
-                us,
-                MIN_EXPOSURE_US,
-                MAX_EXPOSURE_US,
-                clamped,
-            )
-            return clamped
-        return us
+        return clamp_and_warn(
+            "Daheng", self.index, "exposure", us,
+            MIN_EXPOSURE_US, MAX_EXPOSURE_US, _log, unit="us",
+        )
 
     def _clamp_gain(self, g: int) -> int:
-        if g < MIN_GAIN or g > MAX_GAIN:
-            clamped = max(MIN_GAIN, min(MAX_GAIN, g))
-            _log.warning(
-                "Daheng[%s] gain %d out of range [%d..%d]; clamped to %d",
-                self.index,
-                g,
-                MIN_GAIN,
-                MAX_GAIN,
-                clamped,
-            )
-            return clamped
-        return g
+        return clamp_and_warn(
+            "Daheng", self.index, "gain", g, MIN_GAIN, MAX_GAIN, _log,
+        )
 
     def set_exposure(self, exposure_us: int) -> None:
         """Set exposure time in microseconds."""
@@ -124,9 +108,12 @@ class DahengController:
         exposure_us = self._clamp_exposure(exposure_us)
         if self.current_exposure == exposure_us:
             return
-        self._cam.ExposureTime.set(exposure_us)
-        self.current_exposure = exposure_us
-        _log.debug("Daheng[%s] exposure set to %dus", self.index, exposure_us)
+        try:
+            self._cam.ExposureTime.set(exposure_us)
+            self.current_exposure = exposure_us
+            _log.debug("Daheng[%s] exposure set to %dus", self.index, exposure_us)
+        except Exception as e:
+            raise DahengControllerError(f"set_exposure failed: {e}") from e
 
     def set_gain(self, gain: int) -> None:
         """Set device gain."""
@@ -138,9 +125,12 @@ class DahengController:
         gain = self._clamp_gain(gain)
         if self.current_gain == gain:
             return
-        self._cam.Gain.set(gain)
-        self.current_gain = gain
-        _log.debug("Daheng[%s] gain set to %d", self.index, gain)
+        try:
+            self._cam.Gain.set(gain)
+            self.current_gain = gain
+            _log.debug("Daheng[%s] gain set to %d", self.index, gain)
+        except Exception as e:
+            raise DahengControllerError(f"set_gain failed: {e}") from e
 
     def get_image_shape(self) -> tuple[int, ...]:
         """Return the image dimensions."""
@@ -167,10 +157,3 @@ class DahengController:
             return arr.astype(np.uint8, copy=False)
         finally:
             self._cam.stream_off()
-
-    @staticmethod
-    def get_available_indices() -> list[int]:
-        """Return list of available camera indices."""
-        mgr = gx.DeviceManager()
-        dev_num, _ = mgr.update_device_list()
-        return list(range(1, dev_num + 1))

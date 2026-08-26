@@ -8,6 +8,7 @@ import pylablib
 
 from dlab.boot import ROOT
 from dlab.utils.config_utils import cfg_get
+from dlab.hardware.wrappers.clamp_utils import clamp_and_warn
 
 
 _log = logging.getLogger(__name__)
@@ -49,8 +50,8 @@ class AndorController:
 
             try:
                 cam.setup_shutter("open")
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("Andor[%s] failed to open shutter: %s", self.device_index, e)
 
             cam.start_acquisition()
             try:
@@ -89,22 +90,11 @@ class AndorController:
                 self._image_shape = None
                 self._current_exposure = None
 
-    def __enter__(self) -> AndorController:
-        self.activate()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.deactivate()
-
     def _clamp_exposure(self, exposure_us: int) -> int:
-        if exposure_us < MIN_EXPOSURE_US or exposure_us > MAX_EXPOSURE_US:
-            clamped = max(MIN_EXPOSURE_US, min(MAX_EXPOSURE_US, exposure_us))
-            _log.warning(
-                "Andor[%s] exposure %dus out of range [%d..%d]; clamped to %dus",
-                self.device_index, exposure_us, MIN_EXPOSURE_US, MAX_EXPOSURE_US, clamped
-            )
-            return clamped
-        return exposure_us
+        return clamp_and_warn(
+            "Andor", self.device_index, "exposure", exposure_us,
+            MIN_EXPOSURE_US, MAX_EXPOSURE_US, _log, unit="us",
+        )
 
     def set_exposure(self, exposure_us: int) -> None:
         """Set exposure time in microseconds."""

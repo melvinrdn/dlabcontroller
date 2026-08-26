@@ -20,6 +20,8 @@ else:
 
 import lucam
 
+from dlab.hardware.wrappers.clamp_utils import clamp_and_warn
+
 DEFAULT_EXPOSURE_US = 20_000
 DEFAULT_GAIN = 1
 MIN_EXPOSURE_US = 50
@@ -138,24 +140,15 @@ class LumeneraController:
             self.current_roi = None
 
     def _clamp_exposure(self, us: int) -> int:
-        if us < MIN_EXPOSURE_US or us > MAX_EXPOSURE_US:
-            clamped = max(MIN_EXPOSURE_US, min(MAX_EXPOSURE_US, us))
-            _log.warning(
-                "Lumenera[%s] exposure %dus out of range [%d..%d]; clamped to %dus",
-                self.index, us, MIN_EXPOSURE_US, MAX_EXPOSURE_US, clamped,
-            )
-            return clamped
-        return us
+        return clamp_and_warn(
+            "Lumenera", self.index, "exposure", us,
+            MIN_EXPOSURE_US, MAX_EXPOSURE_US, _log, unit="us",
+        )
 
     def _clamp_gain(self, g: int) -> int:
-        if g < MIN_GAIN or g > MAX_GAIN:
-            clamped = max(MIN_GAIN, min(MAX_GAIN, g))
-            _log.warning(
-                "Lumenera[%s] gain %d out of range [%d..%d]; clamped to %d",
-                self.index, g, MIN_GAIN, MAX_GAIN, clamped,
-            )
-            return clamped
-        return g
+        return clamp_and_warn(
+            "Lumenera", self.index, "gain", g, MIN_GAIN, MAX_GAIN, _log,
+        )
 
     def _refresh_shape(self) -> None:
         """Take a probe snapshot to update _imshape and _dtype after format changes."""
@@ -183,9 +176,12 @@ class LumeneraController:
         exposure_us = self._clamp_exposure(exposure_us)
         if self.current_exposure == exposure_us:
             return
-        self._cam.set_properties(exposure=exposure_us / 1000.0)
-        self.current_exposure = exposure_us
-        _log.debug("Lumenera[%s] exposure set to %dus", self.index, exposure_us)
+        try:
+            self._cam.set_properties(exposure=exposure_us / 1000.0)
+            self.current_exposure = exposure_us
+            _log.debug("Lumenera[%s] exposure set to %dus", self.index, exposure_us)
+        except Exception as e:
+            raise LumeneraControllerError(f"set_exposure failed: {e}") from e
 
     def set_gain(self, gain: int) -> None:
         """Set device gain (multiplicative, 1 = unity)."""
@@ -197,9 +193,12 @@ class LumeneraController:
         gain = self._clamp_gain(gain)
         if self.current_gain == gain:
             return
-        self._cam.set_properties(gain=float(gain))
-        self.current_gain = gain
-        _log.debug("Lumenera[%s] gain set to %d", self.index, gain)
+        try:
+            self._cam.set_properties(gain=float(gain))
+            self.current_gain = gain
+            _log.debug("Lumenera[%s] gain set to %d", self.index, gain)
+        except Exception as e:
+            raise LumeneraControllerError(f"set_gain failed: {e}") from e
 
     def set_roi(self, x: int, y: int, width: int, height: int) -> None:
         """Set hardware ROI in sensor pixel coordinates.
@@ -292,9 +291,3 @@ class LumeneraController:
         if arr is None:
             raise LumeneraControllerError("capture_single: image array is None")
         return arr
-
-    @staticmethod
-    def get_available_indices() -> list[int]:
-        """Return list of available camera indices (1-based, matching lucam convention)."""
-        n = lucam.LucamNumCameras()
-        return list(range(1, n + 1))
