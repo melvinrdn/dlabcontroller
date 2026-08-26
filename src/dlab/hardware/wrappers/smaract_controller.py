@@ -93,8 +93,10 @@ class SmarActController:
             try:
                 self.stage.stop("all")
             finally:
-                self.stage.close()
-        self.stage = None
+                try:
+                    self.stage.close()
+                finally:
+                    self.stage = None
 
 
 class SmarActAxis:

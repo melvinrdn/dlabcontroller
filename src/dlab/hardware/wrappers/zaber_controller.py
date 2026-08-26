@@ -35,7 +35,11 @@ class ZaberBinaryController:
             raise ZaberNotActivatedError(f"No Zaber devices found on {self.port}@{self.baud_rate}")
         self.device = devices[0]
         if homing:
-            self.home()
+            try:
+                self.home()
+            except Exception:
+                self.disable()
+                raise
 
     def home(self, blocking: bool = True) -> None:
         dev = self._ensure()
@@ -63,7 +67,9 @@ class ZaberBinaryController:
             if self.device is not None:
                 self.device.stop()
         finally:
-            if self.conn is not None:
-                self.conn.close()
-        self.device = None
-        self.conn = None
+            try:
+                if self.conn is not None:
+                    self.conn.close()
+            finally:
+                self.device = None
+                self.conn = None

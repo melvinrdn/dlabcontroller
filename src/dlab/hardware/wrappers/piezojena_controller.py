@@ -3,8 +3,12 @@ import time
 
 V_MIN = 0.0
 V_MAX = 140.0
-RANGE_UM = 100.0
-    
+
+
+class NV40Error(RuntimeError):
+    """Raised for NV40 protocol/configuration errors."""
+
+
 class NV40:
     ERRORS = {
         'err,1': 'Unknown command',
@@ -16,6 +20,9 @@ class NV40:
         'err,7': 'Position out of range',
     }
     def __init__(self, port, timeout=0.05, closed_loop=False):
+        if closed_loop:
+            raise NV40Error("Closed-loop mode is not supported on this NV40.")
+
         self.ser = serial.Serial(
             port=port,
             baudrate=9600,
@@ -28,12 +35,6 @@ class NV40:
         time.sleep(0.05)
 
         self.set_remote_control(True)
-
-        if closed_loop:
-            raise RuntimeError(
-                "Closed-loop mode is not supported on this NV40."
-            )
-
         self._send("ol")
 
     def close(self):
@@ -54,7 +55,7 @@ class NV40:
         self.ser.write((cmd + "\r").encode())
         ans = self.ser.readline().decode(errors="ignore").strip()
         if ans in self.ERRORS:
-            raise ValueError(self.ERRORS[ans])
+            raise NV40Error(self.ERRORS[ans])
         return ans
 
     def set_remote_control(self, enable=True):
@@ -62,7 +63,7 @@ class NV40:
 
     def set_closed_loop(self, enable=True):
         if enable:
-            raise RuntimeError("Closed loop not supported.")
+            raise NV40Error("Closed loop not supported.")
         self._send("ol")
 
     def set_position(self, value: float):
@@ -73,8 +74,8 @@ class NV40:
         ans = self._query("rd")
         try:
             return float(ans.split(",")[1])
-        except:
-            return float('nan')
+        except (IndexError, ValueError) as e:
+            raise NV40Error(f"Unparseable position reply {ans!r}") from e
 
     @classmethod
     def get_voltage_limits(cls):
