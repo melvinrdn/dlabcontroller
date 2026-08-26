@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -19,6 +19,7 @@ from dlab.boot import get_config
 from dlab.hardware.wrappers.zaber_controller import ZaberBinaryController
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
+from dlab.utils.position_poller import PositionPoller
 
 REGISTRY_KEY = "stage:zaber:grating_compressor"
 
@@ -47,10 +48,12 @@ class GratingCompressorWindow(QWidget):
 
         self._init_ui()
 
-        # Position polling timer
-        self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(200)  # ms
-        self._poll_timer.timeout.connect(self._update_position)
+        self._poller = PositionPoller(
+            get_position=lambda: self._stage.get_position() if self._stage else None,
+            target_edit=self._cur_pos_edit,
+            log=self._log_message,
+            parent=self,
+        )
 
     def _init_ui(self) -> None:
         main = QVBoxLayout(self)
@@ -153,22 +156,6 @@ class GratingCompressorWindow(QWidget):
             self._log.log(msg, source="Compressor")
 
     # -------------------------------------------------------------------------
-    # Position polling
-    # -------------------------------------------------------------------------
-
-    def _update_position(self) -> None:
-        if not self._stage:
-            self._poll_timer.stop()
-            return
-        try:
-            p = self._stage.get_position()
-            if p is not None:
-                self._cur_pos_edit.setText(f"{p:.3f}")
-        except Exception as e:
-            self._log_message(f"Position read failed: {e}")
-            self._poll_timer.stop()
-
-    # -------------------------------------------------------------------------
     # UI state management
     # -------------------------------------------------------------------------
 
@@ -219,7 +206,7 @@ class GratingCompressorWindow(QWidget):
             self._activate_btn.setEnabled(False)
             self._port_edit.setEnabled(False)
             self._baud_edit.setEnabled(False)
-            self._poll_timer.start()
+            self._poller.start()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Activation failed: {e}")
             self._log_message(f"Activation failed: {e}")
@@ -242,7 +229,7 @@ class GratingCompressorWindow(QWidget):
             self._activate_btn.setEnabled(True)
             self._port_edit.setEnabled(True)
             self._baud_edit.setEnabled(True)
-            self._poll_timer.stop()
+            self._poller.stop()
 
     def _on_home(self) -> None:
         if not self._stage:
@@ -251,7 +238,7 @@ class GratingCompressorWindow(QWidget):
         try:
             self._stage.home(blocking=False)
             self._log_message("Homing…")
-            self._poll_timer.start()
+            self._poller.start()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Home failed: {e}")
             self._log_message(f"Home failed: {e}")
@@ -312,7 +299,7 @@ class GratingCompressorWindow(QWidget):
             tgt = max(self._range_min, min(self._range_max, tgt))
             self._stage.move_to(tgt, blocking=False)
             self._log_message(f"Move to {tgt:.3f} mm …")
-            self._poll_timer.start()
+            self._poller.start()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Relative move failed: {e}")
             self._log_message(f"Relative move failed: {e}")

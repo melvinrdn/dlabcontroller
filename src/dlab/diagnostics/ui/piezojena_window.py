@@ -19,6 +19,7 @@ from dlab.boot import get_config
 from dlab.hardware.wrappers.piezojena_controller import NV40
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
+from dlab.utils.position_poller import PositionPoller
 
 
 class PiezoJenaBlock(QGroupBox):
@@ -46,6 +47,13 @@ class PiezoJenaBlock(QGroupBox):
         self._range_min, self._range_max = NV40.get_voltage_limits()
 
         self._init_ui()
+
+        self._poller = PositionPoller(
+            get_position=lambda: self._stage.get_position() if self._stage else None,
+            target_edit=self._cur_pos_edit,
+            log=self._log_message,
+            parent=self,
+        )
 
     def _init_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -176,6 +184,8 @@ class PiezoJenaBlock(QGroupBox):
             except Exception:
                 self._cur_pos_edit.setText("—")
 
+            self._poller.start()
+
         except Exception as e:
             QMessageBox.critical(
                 self, "Error", f"[{self._label}] Activation failed: {e}"
@@ -196,6 +206,7 @@ class PiezoJenaBlock(QGroupBox):
             self._log_message("Deactivated.")
         finally:
             self._stage = None
+            self._poller.stop()
             self._set_controls_enabled(False)
             self._activate_btn.setEnabled(True)
             self._port_edit.setEnabled(True)

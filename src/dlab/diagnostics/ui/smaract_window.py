@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -15,11 +15,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QDoubleValidator
 
-from dlab.boot import ROOT, get_config
+from dlab.boot import ROOT
 from dlab.hardware.wrappers.smaract_controller import SmarActAxis, SmarActController
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.config_utils import cfg_get
+from dlab.utils.position_poller import PositionPoller
 from dlab.utils.yaml_utils import read_yaml, write_yaml
 
 
@@ -46,13 +47,16 @@ class SmarActAxisRow(QWidget):
         self._log = log_panel
         self._label_text = label or f"Axis {self._axis}:"
 
-        self._poll = QTimer(self)
-        self._poll.setInterval(200)
-        self._poll.timeout.connect(self._update_position)
-
         self._init_ui()
+        self._poller = PositionPoller(
+            get_position=lambda: self._controller.get_position(self._axis),
+            target_edit=self._current_edit,
+            log=self._log_message,
+            fmt="{:.3e}",
+            parent=self,
+        )
         if has_sensor:
-            self._poll.start()
+            self._poller.start()
 
     def _init_ui(self) -> None:
         layout = QHBoxLayout(self)
@@ -94,15 +98,6 @@ class SmarActAxisRow(QWidget):
         if self._log:
             self._log.log(f"Axis {self._axis}: {msg}", source="SmarAct")
 
-    def _update_position(self) -> None:
-        try:
-            pos = self._controller.get_position(self._axis)
-            if pos is not None:
-                self._current_edit.setText(f"{pos:.3e}")
-        except Exception as e:
-            self._poll.stop()
-            self._log_message(f"Position read failed: {e}")
-
     def _on_home(self) -> None:
         try:
             self._controller.home(self._axis, blocking=False)
@@ -129,7 +124,7 @@ class SmarActAxisRow(QWidget):
             self._log_message(f"Move failed: {e}")
 
     def stop_polling(self) -> None:
-        self._poll.stop()
+        self._poller.stop()
 
 
 class SmarActStageWindow(QWidget):

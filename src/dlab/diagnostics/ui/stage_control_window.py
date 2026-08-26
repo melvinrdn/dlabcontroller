@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget,
     QHBoxLayout,
@@ -22,6 +22,7 @@ from dlab.boot import get_config
 from dlab.core.device_registry import REGISTRY
 from dlab.utils.log_panel import LogPanel
 from dlab.utils.config_utils import cfg_get
+from dlab.utils.position_poller import PositionPoller
 
 from dlab.hardware.wrappers.thorlabs_controller import ThorlabsController
 
@@ -92,14 +93,17 @@ class StageRow(QWidget):
         self.controller: ThorlabsController | None = None
         self._log = log_panel
 
-        self._poll = QTimer(self)
-        self._poll.setInterval(200)
-        self._poll.timeout.connect(self._update_position)
-
         self.amplitude = 1.0
         self.offset = 0.0
 
         self._init_ui(description)
+
+        self._poller = PositionPoller(
+            get_position=lambda: self.controller.get_position() if self.controller else None,
+            target_edit=self._current_edit,
+            log=self._log_message,
+            parent=self,
+        )
 
     def _init_ui(self, description: str) -> None:
         layout = QHBoxLayout(self)
@@ -191,22 +195,6 @@ class StageRow(QWidget):
             self._log.log(full_msg, source="Thorlabs")
 
     # -------------------------------------------------------------------------
-    # Position polling
-    # -------------------------------------------------------------------------
-
-    def _update_position(self) -> None:
-        if not self.controller:
-            self._poll.stop()
-            return
-        try:
-            pos = self.controller.get_position()
-            if pos is not None:
-                self._current_edit.setText(f"{pos:.3f}")
-        except Exception as e:
-            self._poll.stop()
-            self._log_message(f"Position read failed: {e}")
-
-    # -------------------------------------------------------------------------
     # UI helpers
     # -------------------------------------------------------------------------
 
@@ -278,7 +266,7 @@ class StageRow(QWidget):
                     else:
                         self._log_message(f"No calibration found for WP{wp_idx}.")
 
-            self._poll.start()
+            self._poller.start()
             self._refresh_target_placeholder()
 
         except Exception as e:
@@ -286,7 +274,7 @@ class StageRow(QWidget):
             self._log_message(f"Activation failed: {e}")
             self.controller = None
             self._stage_label.setStyleSheet("")
-            self._poll.stop()
+            self._poller.stop()
 
     def _on_home(self) -> None:
         if not self.controller:
@@ -295,7 +283,7 @@ class StageRow(QWidget):
         try:
             self.controller.home(blocking=False)
             self._log_message("Homing…")
-            self._poll.start()
+            self._poller.start()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to home stage: {e}")
             self._log_message(f"Home failed: {e}")
@@ -346,7 +334,7 @@ class StageRow(QWidget):
                 else:
                     self._log_message(f"Moving to {angle_deg:.3f}° (fraction={frac:.3f})…")
 
-                self._poll.start()
+                self._poller.start()
                 return
 
             # Normal angle/position mode
@@ -355,7 +343,7 @@ class StageRow(QWidget):
                 value = value % 360.0
             self.controller.move_to(value, blocking=False)
             self._log_message(f"Moving to {value:.3f}{'°' if self.is_waveplate else ''} …")
-            self._poll.start()
+            self._poller.start()
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to move stage: {e}")
