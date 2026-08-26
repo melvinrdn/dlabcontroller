@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import logging
 from datetime import datetime
@@ -92,13 +91,13 @@ class AutoAttCalibWorker(QObject):
                 self._pm.deactivate()
         except Exception as e:
             self.log_signal.emit(f"Powermeter close error: {e}")
-        #try:
-            #if self._motor:
-                #self._motor.disable()
-        #except Exception as e:
-            #self.log_signal.emit(f"Motor close error: {e}")
+        try:
+            if self._motor:
+                self._motor.disable()
+        except Exception as e:
+            self.log_signal.emit(f"Motor close error: {e}")
         self._pm = None
-        #self._motor = None
+        self._motor = None
 
     def run(self) -> None:
 
@@ -258,6 +257,8 @@ class AutoWaveplateCalibWindow(QMainWindow):
             n = int(self.npts_edit.text())
             if n < 2:
                 raise ValueError("Points must be ≥ 2.")
+            if stab < 0:
+                raise ValueError("Stabilization must be ≥ 0.")
         except Exception as e:
             QMessageBox.critical(self, "Invalid input", str(e))
             return
