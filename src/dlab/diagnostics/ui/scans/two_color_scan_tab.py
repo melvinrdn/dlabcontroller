@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
-from PIL import Image, PngImagePlugin
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
 from PyQt5.QtWidgets import (
@@ -27,6 +26,11 @@ import logging
 from dlab.core.device_registry import REGISTRY
 from dlab.hardware.wrappers.phase_settings import PhaseSettings
 from dlab.utils.paths_utils import data_dir, cfg_get
+from dlab.diagnostics.ui.scans.scan_utils import (
+    confirm_large_scan,
+    generate_positions,
+    save_png_with_meta,
+)
 
 logger = logging.getLogger("dlab.scans.two_color_scan_tab")
 
@@ -48,28 +52,6 @@ SPECTRUM_MEASUREMENT_DELAY_S = 0.01
 
 # Numerical margin when checking clip conditions (W/cm2 relative tolerance).
 CLIP_TOL = 1e-9
-
-
-# -----------------------------------------------------------------------------
-# Helper functions - File I/O (mirrors grid_scan_tab, 16-bit only)
-# -----------------------------------------------------------------------------
-
-
-def _save_png_with_meta(folder: Path, filename: str, frame_u16: np.ndarray, meta: dict) -> Path:
-    """Save a 16-bit PNG image with metadata. Requires uint16 input."""
-    if frame_u16.dtype != np.uint16:
-        raise TypeError(
-            f"_save_png_with_meta requires uint16, got {frame_u16.dtype}. "
-            "Cast explicitly before calling."
-        )
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / filename
-    img = Image.fromarray(frame_u16, mode="I;16")
-    pnginfo = PngImagePlugin.PngInfo()
-    for k, v in meta.items():
-        pnginfo.add_text(str(k), str(v))
-    img.save(path.as_posix(), format="PNG", pnginfo=pnginfo)
-    return path
 
 
 def _detector_display_name(det_key: str, dev, meta: dict | None) -> str:
@@ -95,7 +77,7 @@ def _detector_display_name(det_key: str, dev, meta: dict | None) -> str:
 # -----------------------------------------------------------------------------
 
 
-def power_to_angle(power_fraction: float, _amp_unused: float, phase_deg: float) -> float:
+def power_to_angle(power_fraction: float, phase_deg: float) -> float:
     """Convert power fraction (0-1) to waveplate angle using calibration phase."""
     y = float(np.clip(power_fraction, 0.0, 1.0))
     return (phase_deg + (45.0 / np.pi) * float(np.arccos(2.0 * y - 1.0))) % 360.0
@@ -562,7 +544,7 @@ class TwoColorScanWorker(QObject):
         file_meta.update({"Exposure_us": exp_meta, "Comment": self.comment})
 
         frame_out = np.clip(frame, 0, 65535).astype(np.uint16, copy=False)
-        _save_png_with_meta(det_day, fn, frame_out, file_meta)
+        save_png_with_meta(det_day, fn, frame_out, file_meta)
         return fn, f"exp {exp_meta} us"
 
     # -------------------------------------------------------------------------
@@ -850,7 +832,7 @@ def _set_waveplate_power(stage_key: str, power_W: float, max_power_W: float) -> 
     REGISTRY.register(_reg_key_maxvalue(wp_index), float(max_power_W))
 
     power_fraction = float(np.clip(power_W / float(max_power_W), 0.0, 1.0))
-    angle = power_to_angle(power_fraction, 1.0, phase_deg)
+    angle = power_to_angle(power_fraction, phase_deg)
 
     stage = REGISTRY.get(stage_key)
     if stage is None:
@@ -1441,25 +1423,6 @@ class TwoColorScanTab(QWidget):
                 self.wp_2omega_picker.addItem(k)
 
     # -------------------------------------------------------------------------
-    # Position generation
-    # -------------------------------------------------------------------------
-
-    def _positions(self, start, end, step):
-        if step <= 0:
-            raise ValueError("Step must be > 0.")
-        if end >= start:
-            n = int((end - start) / step)
-            vals = [start + i * step for i in range(n + 1)]
-            if abs(vals[-1] - end) > 1e-9:
-                vals.append(end)
-        else:
-            n = int((start - end) / step)
-            vals = [start - i * step for i in range(n + 1)]
-            if abs(vals[-1] - end) > 1e-9:
-                vals.append(end)
-        return vals
-
-    # -------------------------------------------------------------------------
     # Parameter collection
     # -------------------------------------------------------------------------
 
@@ -1469,7 +1432,7 @@ class TwoColorScanTab(QWidget):
             raise ValueError("Select a phase lock controller.")
 
         try:
-            setpoints = self._positions(
+            setpoints = generate_positions(
                 float(self.sp_start.text()), float(self.sp_end.text()), float(self.sp_step.text())
             )
         except ValueError as e:
@@ -1532,7 +1495,7 @@ class TwoColorScanTab(QWidget):
             slm_screen = 3
 
         try:
-            ratio_values = self._positions(
+            ratio_values = generate_positions(
                 float(self.ratio_start.text()), float(self.ratio_end.text()),
                 float(self.ratio_step.text()),
             )
@@ -1614,8 +1577,10 @@ class TwoColorScanTab(QWidget):
 
         # Lower bound only: with no timeout, a point takes at least X new
         # acquisitions (one get_current_phase() read per ~0.1 s loop) to fill
-        # the window, and longer whenever the lock takes time to settle.
-        min_wait = p["stability_samples"] * 0.1
+        # the window, and longer whenever the lock takes time to settle. The
+        # first sample is immediate, so filling the window only needs
+        # (X - 1) further 0.1 s sleeps.
+        min_wait = max(0, p["stability_samples"] - 1) * 0.1
 
         detector_time = 0.0
         for _det_key, params in p["detector_params"].items():
@@ -1669,6 +1634,10 @@ class TwoColorScanTab(QWidget):
             )
             if reply != QMessageBox.Yes:
                 return
+
+        n_points = len(p["ratio_values"]) * len(p["setpoints"])
+        if not confirm_large_scan(self, n_points, len(p["detector_params"])):
+            return
 
         self._cached_params = p
         self._doing_background = False
