@@ -32,12 +32,13 @@ class _LivePowerThread(QThread):
     power_signal = pyqtSignal(float, float)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, ctrl: PowermeterController, period_s: float):
+    def __init__(self, ctrl: PowermeterController, period_s: float, io_lock=None):
         super().__init__()
         self._ctrl = ctrl
         self._period = float(max(0.02, period_s))
         self._running = True
         self._lock = threading.Lock()
+        self._io_lock = io_lock
 
     def update_period(self, period_s: float) -> None:
         with self._lock:
@@ -52,7 +53,9 @@ class _LivePowerThread(QThread):
                 with self._lock:
                     period = self._period
 
-                val = float(self._ctrl.read_power())
+                io_lock = self._io_lock or threading.Lock()
+                with io_lock:
+                    val = float(self._ctrl.read_power())
                 ts = time.time()
                 self.power_signal.emit(ts, val)
                 time.sleep(period)
@@ -74,6 +77,7 @@ class PowermeterLiveWindow(QWidget):
         self._log = log_panel
         self._ctrl: PowermeterController | None = None
         self._capture_thread: _LivePowerThread | None = None
+        self._io_lock = threading.Lock()
         self._registry_key: str | None = None
 
         # Data buffers
@@ -377,17 +381,18 @@ class PowermeterLiveWindow(QWidget):
         try:
             wl = float(self._current_wavelength_nm())
             av = int(float(self._avg_edit.text()))
-            self._ctrl.set_wavelength(wl)
-            self._ctrl.set_avg(av)
+            with self._io_lock:
+                self._ctrl.set_wavelength(wl)
+                self._ctrl.set_avg(av)
 
-            try:
-                self._ctrl.set_auto_range(True)
-            except Exception:
-                pass
-            try:
-                self._ctrl.set_bandwidth("high")
-            except Exception:
-                pass
+                try:
+                    self._ctrl.set_auto_range(True)
+                except Exception:
+                    pass
+                try:
+                    self._ctrl.set_bandwidth("high")
+                except Exception:
+                    pass
 
             self._log_message("Settings applied.")
         except Exception as e:
@@ -411,9 +416,9 @@ class PowermeterLiveWindow(QWidget):
         self._t.clear()
         self._y.clear()
 
-        self._capture_thread = _LivePowerThread(self._ctrl, period)
+        self._capture_thread = _LivePowerThread(self._ctrl, period, io_lock=self._io_lock)
         self._capture_thread.power_signal.connect(self._update_power)
-        self._capture_thread.error_signal.connect(lambda e: self._log_message(f"Error: {e}"))
+        self._capture_thread.error_signal.connect(self._on_capture_thread_error, Qt.QueuedConnection)
         self._capture_thread.start()
 
         self._log_message("Live started.")
@@ -424,13 +429,19 @@ class PowermeterLiveWindow(QWidget):
     def _stop_live(self):
         if self._capture_thread:
             self._capture_thread.stop()
-            self._capture_thread.wait()
+            if not self._capture_thread.wait(2000):
+                self._log_message("Capture thread did not stop cleanly.")
             self._capture_thread = None
             self._log_message("Live stopped.")
 
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._deactivate_btn.setEnabled(True)
+
+    def _on_capture_thread_error(self, err: str):
+        self._log_message(f"Live capture thread error: {err}")
+        QMessageBox.critical(self, "Acquisition error", f"Live capture stopped: {err}")
+        self._stop_live()
 
     # -------------------------------------------------------------------------
     # Data handling
