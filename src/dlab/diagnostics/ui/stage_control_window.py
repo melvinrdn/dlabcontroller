@@ -50,7 +50,7 @@ def _reg_key_calib(wp_index: int) -> str:
     return f"waveplate:calib:{wp_index}"
 
 
-def power_to_angle(power_fraction: float, _amp_unused: float, phase_deg: float) -> float:
+def power_to_angle(power_fraction: float, phase_deg: float) -> float:
     """Convert power fraction (0-1) to waveplate angle using calibration phase."""
     y = float(np.clip(power_fraction, 0.0, 1.0))
     return (phase_deg + (45.0 / np.pi) * float(np.arccos(2.0 * y - 1.0))) % 360.0
@@ -326,7 +326,7 @@ class StageRow(QWidget):
                 if mv is None:
                     mv = REGISTRY.get(f"waveplate:max:{wp_idx}")
 
-                angle_deg = power_to_angle(frac, 1.0, phase)
+                angle_deg = power_to_angle(frac, phase)
                 self.controller.move_to(angle_deg, blocking=False)
 
                 if mv is not None and np.isfinite(float(mv)):
