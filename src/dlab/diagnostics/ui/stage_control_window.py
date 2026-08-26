@@ -552,6 +552,7 @@ class StageControlWindow(QMainWindow):
                 view.close()
             except Exception:
                 pass
+        REGISTRY.unregister("ui:waveplate_calib_widget")
         self.closed.emit()
         super().closeEvent(event)
 
