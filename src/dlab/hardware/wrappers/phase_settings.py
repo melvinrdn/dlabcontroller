@@ -43,13 +43,28 @@ w_L = float(_w_L_config) if isinstance(_w_L_config, (int, float, str)) else 3.5e
 phase_types = [
     "Flat",
     "Lens",
-    "Lens",
+    "Zernike",
+    "Binary",
+    "BinaryGrating",
+    "PhaseJumps",
     "Tilt",
     "Vortex",
     "TwoFociStochastic",
     "FourFociStochastic",
-    "Hypergeometric"
+    "Hypergeometric",
 ]
+
+
+def _chip_grid():
+    """Cartesian (X, Y) grid over the physical chip extent, in meters.
+
+    Shared by every phase type that works in physical chip coordinates
+    (as opposed to Zernike's normalized pupil grid or Hypergeometric's
+    pixel-pitch grid, which need their own conventions).
+    """
+    x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
+    y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
+    return np.meshgrid(x, y, indexing="xy")
 
 
 class BaseTypeWidget(QtWidgets.QWidget):
@@ -233,9 +248,7 @@ class TypeLens(BaseTypeWidget):
             return np.zeros(slm_size)
 
         focal_length = 1 / bending_strength
-        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
-        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
-        X, Y = np.meshgrid(x, y)
+        X, Y = _chip_grid()
         R_squared = X**2 + Y**2
 
         phase_profile = (-np.pi * R_squared) / (wavelength * focal_length)
@@ -507,10 +520,8 @@ class TypeVortex(BaseTypeWidget):
             self.lbl_vortices.setText(text)
 
     def phase(self):
-        x = np.linspace(-chip_width, chip_width, slm_size[1])
-        y = np.linspace(-chip_height, chip_height, slm_size[0])
-        X, Y = np.meshgrid(x, y)
-        rho = np.sqrt(X**2 + Y**2) / 2
+        X, Y = _chip_grid()
+        rho = np.sqrt(X**2 + Y**2)
         phase_profile = np.zeros(slm_size)
         for radius, order in self.vortices:
             radius_scaled = radius * w_L
@@ -559,9 +570,7 @@ class TypeBinary(BaseTypeWidget):
             print("Invalid parameter values.")
             return np.zeros(slm_size)
         phase_mat = np.zeros(slm_size)
-        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
-        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
-        X, Y = np.meshgrid(x, y)
+        X, Y = _chip_grid()
         X_rot = X * np.cos(angle_rad) + Y * np.sin(angle_rad)
         stripe_width = chip_width / stripes
         for i in range(stripes):
@@ -705,10 +714,8 @@ class TypePhaseJumps(BaseTypeWidget):
             self.lbl_jumps.setText(text)
 
     def phase(self):
-        x = np.linspace(-chip_width, chip_width, slm_size[1])
-        y = np.linspace(-chip_height, chip_height, slm_size[0])
-        X, Y = np.meshgrid(x, y)
-        rho = np.sqrt(X**2 + Y**2) / 2
+        X, Y = _chip_grid()
+        rho = np.sqrt(X**2 + Y**2)
         phase_profile = np.zeros_like(X)
         for distance, phase_value in self.phase_jumps:
             indices = rho <= distance * w_L
@@ -760,15 +767,14 @@ class TypeTilt(BaseTypeWidget):
             f = float(self.le_f.text())
             d_s = float(self.le_shift.text()) * 1e-6
             angle_deg = float(self.le_angle.text())
-        except:
+        except Exception as e:
+            print("Invalid parameter values for Tilt:", e)
             return np.zeros(slm_size)
 
         if wl <= 0 or f == 0:
             return np.zeros(slm_size)
 
-        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
-        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
-        X, Y = np.meshgrid(x, y, indexing="xy")
+        X, Y = _chip_grid()
 
         ang = np.deg2rad(angle_deg)
         U = X * np.cos(ang) + Y * np.sin(ang)
@@ -894,7 +900,8 @@ class TypeTwoFociStochastic(BaseTypeWidget):
             n_d_a = float(self.le_n_d_a.text())
             n_d_b = float(self.le_n_d_b.text())
             seed = float(self.le_seed.text())
-        except:
+        except Exception as e:
+            print("Invalid parameter values for TwoFociStochastic:", e)
             return np.zeros(slm_size)
 
         if wl <= 0 or f == 0 or M < 1:
@@ -904,9 +911,7 @@ class TypeTwoFociStochastic(BaseTypeWidget):
 
         patch_size = M * pixel_size  # ℓ = M·p
 
-        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
-        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
-        X, Y = np.meshgrid(x, y, indexing="xy")
+        X, Y = _chip_grid()
 
         ang = np.deg2rad(angle_deg)
         U = X * np.cos(ang) + Y * np.sin(ang)  # main axis
@@ -1054,7 +1059,8 @@ class TypeHypergeometric(BaseTypeWidget):
             dump_dx = float(self.le_dump_dx.text()) * 1e-6
             dump_dy = float(self.le_dump_dy.text()) * 1e-6
             seed = float(self.le_seed.text())
-        except:
+        except Exception as e:
+            print("Invalid parameter values for Hypergeometric:", e)
             return np.zeros(slm_size)
 
         if wl <= 0 or f == 0 or R_pupil <= 0 or w0_factor <= 0 or M < 1:
@@ -1195,7 +1201,8 @@ class TypeFourFociStochastic(BaseTypeWidget):
             M = int(float(self.le_M.text()))
             angle_deg = float(self.le_angle.text())
             seed = float(self.le_seed.text())
-        except:
+        except Exception as e:
+            print("Invalid parameter values for FourFociStochastic:", e)
             return np.zeros(slm_size)
 
         if wl <= 0 or f == 0 or M < 1:
@@ -1205,9 +1212,7 @@ class TypeFourFociStochastic(BaseTypeWidget):
 
         patch_size = M * pixel_size  # ℓ = M·p
 
-        x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
-        y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
-        X, Y = np.meshgrid(x, y, indexing="xy")
+        X, Y = _chip_grid()
 
         k0 = 2 * np.pi / wl
         k_t = k0 * d_s / (2 * f)
