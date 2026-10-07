@@ -88,6 +88,9 @@ class SmarActController:
             return None
         return self.stage.get_position(axis)
 
+    def is_moving(self, axis: int) -> bool:
+        return bool(self._ensure().is_moving(axis))
+
     def disable(self) -> None:
         if self.stage is not None:
             try:

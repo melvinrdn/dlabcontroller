@@ -12,6 +12,8 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QGroupBox,
     QMessageBox,
+    QComboBox,
+    QInputDialog,
 )
 from PyQt5.QtGui import QDoubleValidator
 
@@ -26,6 +28,11 @@ from dlab.utils.yaml_utils import read_yaml, write_yaml
 
 def _config_path():
     return ROOT / "config" / "config.yaml"
+
+
+# The controller works in meters; this window displays and accepts micrometers.
+_UM = 1e-6
+_STEPS_UM = (-100, -10, -1, 1, 10, 100)
 
 
 class SmarActAxisRow(QWidget):
@@ -46,13 +53,15 @@ class SmarActAxisRow(QWidget):
         self._has_sensor = has_sensor
         self._log = log_panel
         self._label_text = label or f"Axis {self._axis}:"
+        # Last commanded target (m), so rapid step clicks accumulate while moving.
+        self._last_target: Optional[float] = None
 
         self._init_ui()
         self._poller = PositionPoller(
-            get_position=lambda: self._controller.get_position(self._axis),
+            get_position=self._get_position_um,
             target_edit=self._current_edit,
             log=self._log_message,
-            fmt="{:.3e}",
+            fmt="{:.3f}",
             parent=self,
         )
         if has_sensor:
@@ -71,8 +80,8 @@ class SmarActAxisRow(QWidget):
         layout.addWidget(self._home_btn)
 
         self._target_edit = QLineEdit()
-        self._target_edit.setPlaceholderText("Position (m)")
-        self._target_edit.setValidator(QDoubleValidator(-1e3, 1e3, 9, self))
+        self._target_edit.setPlaceholderText("Position (µm)")
+        self._target_edit.setValidator(QDoubleValidator(-1e9, 1e9, 3, self))
         self._target_edit.setFixedWidth(120)
         layout.addWidget(self._target_edit)
 
@@ -81,10 +90,20 @@ class SmarActAxisRow(QWidget):
         layout.addWidget(self._move_btn)
 
         self._current_edit = QLineEdit()
-        self._current_edit.setPlaceholderText("Current")
+        self._current_edit.setPlaceholderText("Current (µm)")
         self._current_edit.setFixedWidth(120)
         self._current_edit.setReadOnly(True)
         layout.addWidget(self._current_edit)
+        layout.addWidget(QLabel("µm"))
+
+        self._step_btns: list[QPushButton] = []
+        for step in _STEPS_UM:
+            btn = QPushButton(f"{step:+d}")
+            btn.setFixedWidth(45)
+            btn.setToolTip(f"Step {step:+d} µm")
+            btn.clicked.connect(lambda _=False, s=step: self._on_step(s))
+            layout.addWidget(btn)
+            self._step_btns.append(btn)
 
         layout.addStretch(1)
 
@@ -92,7 +111,13 @@ class SmarActAxisRow(QWidget):
             self._home_btn.setEnabled(False)
             self._target_edit.setEnabled(False)
             self._move_btn.setEnabled(False)
+            for btn in self._step_btns:
+                btn.setEnabled(False)
             self._current_edit.setPlaceholderText("No sensor")
+
+    def _get_position_um(self) -> Optional[float]:
+        pos = self._controller.get_position(self._axis)
+        return None if pos is None else pos / _UM
 
     def _log_message(self, msg: str) -> None:
         if self._log:
@@ -117,11 +142,30 @@ class SmarActAxisRow(QWidget):
             QMessageBox.warning(self, "Error", "Invalid position.")
             return
         try:
-            self._controller.move_to(self._axis, value, blocking=False)
-            self._log_message(f"Moving to {value:.3e} m…")
+            self._controller.move_to(self._axis, value * _UM, blocking=False)
+            self._last_target = value * _UM
+            self._log_message(f"Moving to {value:.3f} µm…")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Axis {self._axis}: move failed: {e}")
             self._log_message(f"Move failed: {e}")
+
+    def _on_step(self, step_um: int) -> None:
+        try:
+            # While a move is in progress, step from the pending target rather
+            # than the in-flight position, so repeated clicks add up exactly.
+            if self._last_target is not None and self._controller.is_moving(self._axis):
+                base = self._last_target
+            else:
+                base = self._controller.get_position(self._axis)
+            if base is None:
+                return
+            target = base + step_um * _UM
+            self._controller.move_to(self._axis, target, blocking=False)
+            self._last_target = target
+            self._log_message(f"Step {step_um:+d} µm → {target / _UM:.3f} µm")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Axis {self._axis}: step failed: {e}")
+            self._log_message(f"Step failed: {e}")
 
     def stop_polling(self) -> None:
         self._poller.stop()
@@ -172,19 +216,28 @@ class SmarActStageWindow(QWidget):
         self._axes_layout = QVBoxLayout(self._axes_group)
         main.addWidget(self._axes_group)
 
-        positions_row = QHBoxLayout()
-        self._save_positions_btn = QPushButton("Save Positions")
-        self._save_positions_btn.setEnabled(False)
-        self._save_positions_btn.clicked.connect(self._on_save_positions)
-        positions_row.addWidget(self._save_positions_btn)
+        positions_group = QGroupBox("Saved Positions")
+        positions_row = QHBoxLayout(positions_group)
+        self._saved_combo = QComboBox()
+        self._saved_combo.setMinimumWidth(200)
+        positions_row.addWidget(self._saved_combo, 1)
 
-        self._goto_saved_positions_btn = QPushButton("Go to Saved Positions")
+        self._goto_saved_positions_btn = QPushButton("Go To")
         self._goto_saved_positions_btn.setEnabled(False)
         self._goto_saved_positions_btn.clicked.connect(self._on_goto_saved_positions)
         positions_row.addWidget(self._goto_saved_positions_btn)
 
-        positions_row.addStretch(1)
-        main.addLayout(positions_row)
+        self._save_positions_btn = QPushButton("Save Current As…")
+        self._save_positions_btn.setEnabled(False)
+        self._save_positions_btn.clicked.connect(self._on_save_positions)
+        positions_row.addWidget(self._save_positions_btn)
+
+        self._delete_saved_btn = QPushButton("Delete")
+        self._delete_saved_btn.clicked.connect(self._on_delete_saved_position)
+        positions_row.addWidget(self._delete_saved_btn)
+
+        main.addWidget(positions_group)
+        self._refresh_saved_combo()
 
         main.addStretch(1)
 
@@ -279,6 +332,33 @@ class SmarActStageWindow(QWidget):
         self._goto_saved_positions_btn.setEnabled(False)
         self._log_message("Disconnected.")
 
+    @staticmethod
+    def _read_saved_positions() -> dict[str, dict[str, float]]:
+        """Named saved positions from config: {name: {"axisN": meters}}."""
+        data = read_yaml(_config_path())
+        saved = (((data.get("smaract") or {}).get("mcs2") or {}).get("saved_positions")) or {}
+        return {str(k): v for k, v in saved.items() if isinstance(v, dict)}
+
+    @staticmethod
+    def _write_saved_positions(saved: dict[str, dict[str, float]]) -> None:
+        path = _config_path()
+        data = read_yaml(path)
+        node = data.get("smaract", {}) if isinstance(data.get("smaract"), dict) else {}
+        mcs2_node = node.get("mcs2", {}) if isinstance(node.get("mcs2"), dict) else {}
+        mcs2_node["saved_positions"] = saved
+        node["mcs2"] = mcs2_node
+        data["smaract"] = node
+        write_yaml(path, data)
+
+    def _refresh_saved_combo(self, select: str | None = None) -> None:
+        current = select or self._saved_combo.currentText()
+        self._saved_combo.clear()
+        names = list(self._read_saved_positions())
+        self._saved_combo.addItems(names)
+        if current in names:
+            self._saved_combo.setCurrentText(current)
+        self._delete_saved_btn.setEnabled(bool(names))
+
     def _on_save_positions(self) -> None:
         if self._controller is None:
             return
@@ -295,30 +375,60 @@ class SmarActStageWindow(QWidget):
             QMessageBox.warning(self, "Error", "No axis positions available to save.")
             return
 
-        path = _config_path()
-        data = read_yaml(path)
-        node = data.get("smaract", {}) if isinstance(data.get("smaract"), dict) else {}
-        mcs2_node = node.get("mcs2", {}) if isinstance(node.get("mcs2"), dict) else {}
-        mcs2_node["saved_positions"] = positions
-        node["mcs2"] = mcs2_node
-        data["smaract"] = node
+        name, ok = QInputDialog.getText(
+            self, "Save Position", "Name:", text=self._saved_combo.currentText()
+        )
+        name = name.strip()
+        if not ok or not name:
+            return
 
         try:
-            write_yaml(path, data)
-            self._log_message(f"Saved positions: {positions}")
+            saved = self._read_saved_positions()
+            if name in saved:
+                reply = QMessageBox.question(
+                    self, "Overwrite", f"Overwrite saved position '{name}'?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            saved[name] = positions
+            self._write_saved_positions(saved)
+            self._refresh_saved_combo(select=name)
+            pretty = ", ".join(f"{k}={v / _UM:.3f} µm" for k, v in positions.items())
+            self._log_message(f"Saved position '{name}': {pretty}")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save positions: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save position: {e}")
+
+    def _on_delete_saved_position(self) -> None:
+        name = self._saved_combo.currentText()
+        if not name:
+            return
+        reply = QMessageBox.question(
+            self, "Delete", f"Delete saved position '{name}'?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            saved = self._read_saved_positions()
+            saved.pop(name, None)
+            self._write_saved_positions(saved)
+            self._refresh_saved_combo()
+            self._log_message(f"Deleted saved position '{name}'.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to delete position: {e}")
 
     def _on_goto_saved_positions(self) -> None:
         if self._controller is None:
             return
 
-        data = read_yaml(_config_path())
-        saved = (((data.get("smaract") or {}).get("mcs2") or {}).get("saved_positions")) or {}
+        name = self._saved_combo.currentText()
+        saved = self._read_saved_positions().get(name)
         if not saved:
-            QMessageBox.information(self, "SmarAct", "No saved positions found.")
+            QMessageBox.information(self, "SmarAct", "No saved position selected.")
             return
 
+        self._log_message(f"Going to saved position '{name}'…")
         for row in self._axis_rows:
             if not row._has_sensor:
                 continue
@@ -327,7 +437,8 @@ class SmarActStageWindow(QWidget):
                 continue
             try:
                 self._controller.move_to(row._axis, float(value), blocking=False)
-                self._log_message(f"Axis {row._axis}: moving to saved position {float(value):.3e} m…")
+                row._last_target = float(value)
+                self._log_message(f"Axis {row._axis}: moving to {float(value) / _UM:.3f} µm…")
             except Exception as e:
                 self._log_message(f"Axis {row._axis}: failed to move to saved position: {e}")
 

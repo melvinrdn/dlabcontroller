@@ -14,8 +14,10 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.cm as cm
 
+from dlab.boot import ROOT, get_config
 from dlab.utils.config_utils import cfg_get
 from dlab.utils.paths_utils import ressources_dir
+from dlab.utils.yaml_utils import read_yaml, write_yaml
 from dlab.utils.log_panel import LogPanel
 
 
@@ -25,6 +27,27 @@ def _wp_calibration_path(wp_index: int) -> Path | None:
     if not rel:
         return None
     return (ressources_dir() / str(rel)).resolve()
+
+
+def _save_wp_calibration_path(wp_index: int, path: Path) -> None:
+    """Remember the calibration file for a waveplate, in config.yaml and in the loaded config."""
+    try:
+        rel = path.resolve().relative_to(ressources_dir()).as_posix()
+    except ValueError:
+        rel = path.resolve().as_posix()
+
+    def set_path(data: dict) -> None:
+        node = data.get("waveplates") if isinstance(data.get("waveplates"), dict) else {}
+        files = node.get("calibration_files") if isinstance(node.get("calibration_files"), dict) else {}
+        files[str(wp_index)] = rel
+        node["calibration_files"] = files
+        data["waveplates"] = node
+
+    cfg_path = ROOT / "config" / "config.yaml"
+    data = read_yaml(cfg_path)
+    set_path(data)
+    write_yaml(cfg_path, data)
+    set_path(get_config())  # so a later reload in this session uses the new file
 
 
 def _load_wp_calibration_file(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -160,7 +183,7 @@ class WaveplateCalibWidget(QWidget):
         self._open_calibration_file(wp_index, p)
         return True
 
-    def _open_calibration_file(self, wp_index: int, filepath: Path):
+    def _open_calibration_file(self, wp_index: int, filepath: Path) -> bool:
         try:
             angles, powers = _load_wp_calibration_file(filepath)
             if angles.size == 0:
@@ -203,9 +226,11 @@ class WaveplateCalibWidget(QWidget):
                 pass
 
             self._canvas.draw_idle()
+            return True
 
         except Exception as e:
             self._log_message(f"Failed to load calibration for WP{wp_index}: {e}")
+            return False
 
     def _update_selected_calibration_file(self):
         wp_index = int(self._wp_dropdown.currentText())
@@ -224,7 +249,13 @@ class WaveplateCalibWidget(QWidget):
         if not fname:
             return
 
-        self._open_calibration_file(wp_index, Path(fname))
+        if not self._open_calibration_file(wp_index, Path(fname)):
+            return
+        try:
+            _save_wp_calibration_path(wp_index, Path(fname))
+            self._log_message(f"WP{wp_index} calibration file saved as default: {fname}")
+        except Exception as e:
+            self._log_message(f"WP{wp_index}: could not save calibration file to config: {e}")
 
     def _log_message(self, message: str):
         if self._log:

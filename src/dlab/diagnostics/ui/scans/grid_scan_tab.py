@@ -142,7 +142,18 @@ def _detector_time_estimate_s(det_key: str, params: tuple) -> float:
 
 
 class GridScanWorker(QObject):
-    """Worker for multi-axis grid scan."""
+    """Worker for multi-axis grid scan.
+
+    By default the scan visits the Cartesian product of the per-axis position
+    lists in ``axes``. Pass ``points`` to visit an explicit list of positions
+    instead: each point is a list of values, one per axis in ``axes`` order.
+    For waveplate axes with ``axes_meta[ax]["pm"]`` set, explicit values are
+    power fractions in [0, 1], converted to angles with the waveplate's
+    calibration when the scan starts.
+    ``point_extras`` optionally gives one dict per point whose values are
+    appended as extra log columns (keys of the first dict name the columns).
+    ``header_notes`` are extra lines written as comments in the log header.
+    """
 
     progress = pyqtSignal(int, int)
     log = pyqtSignal(str)
@@ -160,9 +171,27 @@ class GridScanWorker(QObject):
         existing_scan_log: str | None = None,
         axes_meta: dict | None = None,
         single_shot: bool = False,
+        points: list[list[float]] | None = None,
+        point_extras: list[dict] | None = None,
+        header_notes: list[str] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
+        if points is not None:
+            n_axes = len(axes)
+            for i, pt in enumerate(points):
+                if len(pt) != n_axes:
+                    raise ValueError(f"Point {i} has {len(pt)} values, expected {n_axes} (one per axis).")
+        if point_extras is not None:
+            if points is None:
+                raise ValueError("point_extras requires an explicit points list.")
+            if len(point_extras) != len(points):
+                raise ValueError("point_extras must have one entry per point.")
+        self.points_input = points  # as given (power fractions), kept for the log header
+        self.points = points  # move targets; fractions become angles in _resolve_explicit_points
+        self.point_extras = point_extras
+        self.extra_columns = list(point_extras[0].keys()) if point_extras else []
+        self.header_notes = list(header_notes or [])
         self.axes = axes
         self.camera_params = camera_params
         self.settle_s = float(settle_s)
@@ -208,6 +237,63 @@ class GridScanWorker(QObject):
 
         yield from rec(0, [])
 
+    def _total_points(self) -> int:
+        if self.single_shot:
+            return 1
+        if self.points is not None:
+            return len(self.points)
+        total = 1
+        for _, pos in self.axes:
+            total *= max(1, len(pos))
+        return total
+
+    def _resolve_explicit_points(self) -> None:
+        """Convert power-fraction values on power-mode axes to waveplate angles.
+
+        Runs once before any move so a missing calibration or an out-of-range
+        fraction aborts the scan before the stages move.
+        """
+        if self.points is None:
+            return
+        converters = {}
+        for k, (ax, _) in enumerate(self.axes):
+            wp = _wp_index_from_stage_key(ax)
+            if wp is None or not self.axes_meta.get(ax, {}).get("pm", False):
+                continue
+            amp_off = REGISTRY.get(_reg_key_calib(wp)) or (None, None)
+            if amp_off[1] is None:
+                raise ValueError(f"{ax}: Power mode ON but no calibration.")
+            converters[k] = float(amp_off[1])
+        if not converters:
+            return
+        resolved = []
+        for i, pt in enumerate(self.points):
+            new_pt = list(pt)
+            for k, phase in converters.items():
+                frac = float(pt[k])
+                if not 0.0 <= frac <= 1.0:
+                    raise ValueError(f"Point {i}: {self.axes[k][0]} power fraction {frac} outside [0, 1].")
+                new_pt[k] = power_to_angle(frac, phase)
+            resolved.append(new_pt)
+        self.points = resolved
+
+    def _iter_points(self):
+        """Yield (point_index, ui_combo) for every point to visit.
+
+        point_index indexes ``point_extras`` in explicit mode, else None.
+        """
+        if self.points is not None:
+            if not self.points:
+                return
+            # Single-shot re-measures the last point, where the stages were left.
+            indices = [len(self.points) - 1] if self.single_shot else range(len(self.points))
+            for i in indices:
+                yield i, [(self.axes[k][0], float(v)) for k, v in enumerate(self.points[i])]
+            return
+
+        for idxs in self._cartesian_indices():
+            yield None, [(self.axes[k][0], self.axes[k][1][idxs[k]]) for k in range(len(self.axes))]
+
     # -------------------------------------------------------------------------
     # Scan log management
     # -------------------------------------------------------------------------
@@ -224,15 +310,27 @@ class GridScanWorker(QObject):
             "Averages_or_None",
             "MCP_Voltage",
         ]
+        header_cols += self.extra_columns
 
         with open(scan_log, "w", encoding="utf-8") as f:
             f.write("\t".join(header_cols) + "\n")
             f.write(f"# {self.comment}\n")
+            for note in self.header_notes:
+                f.write(f"# {note}\n")
 
-            for ax, _ in self.axes:
+            if self.points_input is not None:
+                f.write(f"# Explicit point list: {len(self.points_input)} points (not a Cartesian grid)\n")
+
+            for k, (ax, _) in enumerate(self.axes):
                 wp = _wp_index_from_stage_key(ax)
                 meta = self.axes_meta.get(ax, {})
                 pm_on = bool(meta.get("pm", False))
+
+                if self.points_input is not None:
+                    vals = [float(pt[k]) for pt in self.points_input]
+                    kind = "power fraction" if (wp is not None and pm_on) else "value"
+                    rng = f"[{min(vals):.6g}, {max(vals):.6g}]" if vals else "[]"
+                    f.write(f"#   {ax}: {len(set(vals))} distinct {kind}s in {rng}\n")
 
                 if wp is not None and pm_on:
                     calib_path = meta.get("calib_path", REGISTRY.get(_reg_key_calib_path(wp)) or "unknown")
@@ -241,13 +339,15 @@ class GridScanWorker(QObject):
                     f.write(
                         f"# PowerMode ON for {ax} (WP{wp}) | calib={calib_path} | max_value={mv_txt}\n"
                     )
+                    if self.points_input is not None:
+                        continue
                     f.write(
                         f"#   Start fraction={float(meta.get('start_fraction', float('nan'))):.6f} | "
                         f"Start angle={float(meta.get('start_angle_deg', float('nan'))):.3f} deg | "
                         f"Rotation={float(meta.get('delta_deg', float('nan'))):.3f} deg | "
                         f"Step={float(meta.get('step_deg', float('nan'))):.3f} deg\n"
                     )
-                else:
+                elif self.points_input is None:
                     f.write(
                         f"# PowerMode OFF for {ax} | "
                         f"Start={float(meta.get('start', float('nan'))):.6g} | "
@@ -572,6 +672,7 @@ class GridScanWorker(QObject):
 
     def run(self) -> None:
         try:
+            self._resolve_explicit_points()
             stages = self._initialize_stages()
             detectors = self._initialize_detectors()
             scan_log = self._create_scan_log()
@@ -580,25 +681,21 @@ class GridScanWorker(QObject):
             self.finished.emit("")
             return
 
-        # Calculate total points
-        if self.single_shot:
-            total_points = 1
-        else:
-            lengths = [len(pos) for _, pos in self.axes]
-            total_points = 1
-            for L in lengths:
-                total_points *= max(1, L)
-        total_images = total_points * max(1, len(self.camera_params))
+        total_images = self._total_points() * max(1, len(self.camera_params))
         done = 0
+        last_targets: dict[str, float] = {}
 
         try:
-            for idxs in self._cartesian_indices():
+            for point_idx, ui_combo in self._iter_points():
                 if self.abort:
                     self._emit("Scan aborted.")
                     self.finished.emit("")
                     return
 
-                ui_combo = [(self.axes[k][0], self.axes[k][1][idxs[k]]) for k in range(len(self.axes))]
+                extra_vals = []
+                if point_idx is not None and self.point_extras is not None:
+                    extras = self.point_extras[point_idx]
+                    extra_vals = [str(extras.get(c, "")) for c in self.extra_columns]
 
                 try:
                     move_targets, log_combo = self._prepare_move_targets(ui_combo)
@@ -611,12 +708,18 @@ class GridScanWorker(QObject):
                 if not self.single_shot:
                     move_ok = True
                     for ax, move_val in move_targets:
+                        # Outer axes repeat their value over many points; re-sending it only
+                        # costs time (an extra SLM publish or a no-op stage move).
+                        if last_targets.get(ax) == move_val:
+                            continue
                         try:
                             if ax.startswith("slm:"):
                                 self._move_slm_axis(ax, move_val)
                             else:
                                 stages[ax].move_to(float(move_val), blocking=True)
+                            last_targets[ax] = move_val
                         except Exception as e:
+                            last_targets.pop(ax, None)
                             self._emit(f"Move {ax} -> {move_val:.6f} failed: {e}")
                             move_ok = False
                             break
@@ -661,6 +764,7 @@ class GridScanWorker(QObject):
                             str(params[1] if len(params) >= 2 else ""),
                             str(self.mcp_voltage),
                         ]
+                        row += extra_vals
 
                         with open(scan_log, "a", encoding="utf-8") as f:
                             f.write("\t".join(row) + "\n")
@@ -691,6 +795,8 @@ class GridScanWorker(QObject):
 
 class GridScanTab(QWidget):
     """Tab for multi-axis grid scan with multiple detectors."""
+
+    _log_source = "GridScan"
 
     def __init__(
         self, log_panel: LogPanel | None = None, parent: QWidget | None = None
@@ -867,7 +973,7 @@ class GridScanTab(QWidget):
 
     def _log_message(self, msg: str) -> None:
         if self._log:
-            self._log.log(msg, source="GridScan")
+            self._log.log(msg, source=self._log_source)
 
     # -------------------------------------------------------------------------
     # Device management
@@ -1135,7 +1241,10 @@ class GridScanTab(QWidget):
                     "step": float(step),
                 }
 
-        # Collect detector parameters
+        return {"axes": axes, "axes_meta": axes_meta, **self._collect_common_params()}
+
+    def _collect_common_params(self) -> dict:
+        """Detector table and scan-name/settle/comment/MCP fields."""
         cam_params = {}
         if self._cam_tbl.rowCount() == 0:
             raise ValueError("Add at least one detector.")
@@ -1161,8 +1270,6 @@ class GridScanTab(QWidget):
         mcp = self._mcp_edit.text().strip()
 
         return {
-            "axes": axes,
-            "axes_meta": axes_meta,
             "camera_params": cam_params,
             "settle": settle,
             "scan_name": name,
@@ -1181,10 +1288,7 @@ class GridScanTab(QWidget):
             QMessageBox.critical(self, "Invalid parameters", str(e))
             return
 
-        axis_counts = [len(pos) for _, pos in p["axes"]]
-        total_points = 1
-        for n in axis_counts:
-            total_points *= max(1, n)
+        total_points = self._total_points(p)
         n_detectors = max(1, len(p["camera_params"]))
         total_acquisitions = total_points * n_detectors
 
@@ -1198,13 +1302,9 @@ class GridScanTab(QWidget):
         minutes = int((total % 3600) // 60)
         seconds = int(total % 60)
 
-        axes_desc = "\n".join(
-            f"  {ax}: {n} points" for (ax, _), n in zip(p["axes"], axis_counts)
-        )
-
         msg = (
-            f"Axes:\n{axes_desc}\n\n"
-            f"Total grid points: {total_points}\n"
+            f"{self._points_summary(p)}\n\n"
+            f"Total points: {total_points}\n"
             f"Detectors: {n_detectors}\n"
             f"Total acquisitions: {total_acquisitions}\n\n"
             f"Settle per point: {p['settle']:.2f} s\n"
@@ -1216,6 +1316,19 @@ class GridScanTab(QWidget):
         QMessageBox.information(self, "Scan Time Estimate", msg)
         self._log_message(f"Estimated minimum scan time: {hours}h {minutes}min {seconds}s")
 
+    @staticmethod
+    def _total_points(p: dict) -> int:
+        if p.get("points") is not None:
+            return len(p["points"])
+        total = 1
+        for _, pos in p["axes"]:
+            total *= max(1, len(pos))
+        return total
+
+    def _points_summary(self, p: dict) -> str:
+        axes_desc = "\n".join(f"  {ax}: {len(pos)} points" for ax, pos in p["axes"])
+        return f"Axes:\n{axes_desc}"
+
     def _on_start(self) -> None:
         try:
             p = self._collect_params()
@@ -1223,10 +1336,7 @@ class GridScanTab(QWidget):
             QMessageBox.critical(self, "Invalid parameters", str(e))
             return
 
-        total_points = 1
-        for _, pos in p["axes"]:
-            total_points *= max(1, len(pos))
-        if not confirm_large_scan(self, total_points, len(p["camera_params"])):
+        if not confirm_large_scan(self, self._total_points(p), len(p["camera_params"])):
             return
 
         self._cached_params = p
@@ -1252,6 +1362,9 @@ class GridScanTab(QWidget):
             existing_scan_log=existing,
             axes_meta=p.get("axes_meta", {}),
             single_shot=single_shot,
+            points=p.get("points"),
+            point_extras=p.get("point_extras"),
+            header_notes=p.get("header_notes"),
         )
 
         self._worker.moveToThread(self._thread)
@@ -1265,13 +1378,8 @@ class GridScanTab(QWidget):
         self._abort_btn.setEnabled(True)
 
         # Calculate total points
-        if single_shot:
-            total = max(1, len(p["camera_params"]))
-        else:
-            total = 1
-            for _, pos in p["axes"]:
-                total *= max(1, len(pos))
-            total *= max(1, len(p["camera_params"]))
+        n_points = 1 if single_shot else self._total_points(p)
+        total = n_points * max(1, len(p["camera_params"]))
         self._progress.setMaximum(total)
         self._progress.setValue(0)
 

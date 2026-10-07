@@ -49,13 +49,18 @@ smaract:
   mcs2:
     locator: network:sn:MCS2-00013918
     saved_positions:
-      axis0: -9.999523799999999e-05
-      axis1: -0.005399994277
-      axis2: 0.001750000496
+      focus flat mask:
+        axis0: -9.998135e-05
+        axis1: -0.003742858841
+        axis2: 0.001299328687
+      two foci 60um:
+        axis0: -3.668174e-05
+        axis1: -0.003651853024
+        axis2: 0.001200475737
 stages:
   default_ids:
     0: '00000000'
-    1: '83837719'
+    1: '83837725'
     2: '83838295'
     3: '00000000'
     4: '00000000'
@@ -65,9 +70,9 @@ stages:
     8: '83837725'
 waveplates:
   calibration_files:
-    '1': calibration/wp1/default_wp1.txt
-    '2': calibration/wp2/default_wp2.txt
-    '3': calibration/wp3/default_wp3.txt
+    '1': calibration/wp1/calib_2025_11_26.txt
+    '2': calibration/wp2/calib_2026_07_07.txt
+    '3': calibration/wp3/calib_2026_07_07-2.txt
     '4': calibration/wp4/default_wp4.txt
     '5': calibration/wp5/default_wp5.txt
     '6': calibration/wp6/default_wp6.txt
