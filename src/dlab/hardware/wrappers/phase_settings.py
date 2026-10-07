@@ -29,6 +29,8 @@ from dlab.hardware.wrappers.slm_controller import (
 import subprocess
 import math
 from dlab.utils.config_utils import cfg_get
+from dlab.hardware.wrappers.arrizon import fractional_vortex_arrizon
+from fractions import Fraction
 
 slm_size = DEFAULT_SLM_SIZE
 chip_width = DEFAULT_CHIP_W
@@ -51,7 +53,7 @@ phase_types = [
     "Vortex",
     "TwoFociStochastic",
     "FourFociStochastic",
-    "Hypergeometric",
+    "FractionalVortexArrizon",
 ]
 
 
@@ -59,15 +61,24 @@ def _chip_grid():
     """Cartesian (X, Y) grid over the physical chip extent, in meters.
 
     Shared by every phase type that works in physical chip coordinates
-    (as opposed to Zernike's normalized pupil grid or Hypergeometric's
-    pixel-pitch grid, which need their own conventions).
+    (as opposed to Zernike's normalized pupil grid, which needs its own
+    convention).
     """
     x = np.linspace(-chip_width / 2, chip_width / 2, slm_size[1])
     y = np.linspace(-chip_height / 2, chip_height / 2, slm_size[0])
     return np.meshgrid(x, y, indexing="xy")
 
 
+def _azimuth(X, Y, rotation_rad=0.0):
+    """Azimuth about the chip centre, measured from `rotation` (CCW), in (-pi, pi]."""
+    return np.angle(np.exp(1j * (np.arctan2(Y, X) - rotation_rad)))
+
+
 class BaseTypeWidget(QtWidgets.QWidget):
+    # True: phase(rotation_deg) rotates the pattern (CCW in the chip grid) with
+    # the SLM window's global rotation; False: fixed in the lab frame.
+    rotatable = False
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -466,6 +477,8 @@ class TypeZernike(BaseTypeWidget):
 
 
 class TypeVortex(BaseTypeWidget):
+    rotatable = True
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.name = "Vortex"
@@ -490,6 +503,10 @@ class TypeVortex(BaseTypeWidget):
         btn_remove.clicked.connect(self.remove_last_vortex)
         grid.addWidget(btn_remove, 2, 1)
 
+        grid.addWidget(QLabel("Angle of the cut [deg]:"), 3, 0)
+        self.le_angle = QLineEdit("0.0")
+        grid.addWidget(self.le_angle, 3, 1)
+
         self.lbl_vortices = QLabel("No vortices added")
         self.lbl_vortices.setWordWrap(True)
         layout.addWidget(self.lbl_vortices)
@@ -497,7 +514,7 @@ class TypeVortex(BaseTypeWidget):
     def add_vortex(self):
         try:
             radius = float(self.le_radius.text())
-            order = int(self.le_order.text())
+            order = float(Fraction(self.le_order.text().strip()))
             self.vortices.append((radius, order))
             self.update_vortex_display()
             self.le_radius.clear()
@@ -515,31 +532,40 @@ class TypeVortex(BaseTypeWidget):
             self.lbl_vortices.setText("No vortices added")
         else:
             text = "\n".join(
-                ["Radius: {:.2f} wL, Order: {}".format(r, o) for r, o in self.vortices]
+                ["Radius: {:.2f} wL, Order: {:g}".format(r, o) for r, o in self.vortices]
             )
             self.lbl_vortices.setText(text)
 
-    def phase(self):
+    def phase(self, rotation_deg=0.0):
+        try:
+            angle_deg = float(self.le_angle.text()) + rotation_deg
+        except ValueError:
+            print("Invalid cut angle for Vortex.")
+            return np.zeros(slm_size)
         X, Y = _chip_grid()
         rho = np.sqrt(X**2 + Y**2)
+        # for a fractional order the 2pi * order step sits at azimuth pi + angle
+        theta = _azimuth(X, Y, np.deg2rad(angle_deg))
         phase_profile = np.zeros(slm_size)
         for radius, order in self.vortices:
             radius_scaled = radius * w_L
             vortex_mask = rho <= radius_scaled
-            theta = np.arctan2(Y, X)
             vortex_phase = (order * theta) % (2 * np.pi)
             phase_profile[vortex_mask] += vortex_phase[vortex_mask]
         return (phase_profile % (2 * np.pi)) * (bit_depth / (2 * np.pi))
 
     def save_(self):
-        return {"vortices": self.vortices}
+        return {"vortices": self.vortices, "angle_deg": self.le_angle.text()}
 
     def load_(self, settings):
         self.vortices = settings.get("vortices", [])
+        self.le_angle.setText(settings.get("angle_deg", "0.0"))
         self.update_vortex_display()
 
 
 class TypeBinary(BaseTypeWidget):
+    rotatable = True
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.name = "Binary"
@@ -560,11 +586,11 @@ class TypeBinary(BaseTypeWidget):
         self.le_angle = QLineEdit("0")
         grid.addWidget(self.le_angle, 2, 1)
 
-    def phase(self):
+    def phase(self, rotation_deg=0.0):
         try:
             phi = float(self.le_phi.text()) * np.pi
             stripes = int(self.le_stripes.text())
-            angle_deg = float(self.le_angle.text())
+            angle_deg = float(self.le_angle.text()) + rotation_deg
             angle_rad = np.radians(angle_deg)
         except ValueError:
             print("Invalid parameter values.")
@@ -803,6 +829,8 @@ class TypeTilt(BaseTypeWidget):
 
 
 class TypeTwoFociStochastic(BaseTypeWidget):
+    rotatable = True
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.name = "TwoFociStochastic"
@@ -831,6 +859,16 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         grid.addWidget(QLabel("Phase difference ΔΦ [π units]:"), row, 0)
         self.le_dphi_pi = QLineEdit("0.0")
         grid.addWidget(self.le_dphi_pi, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Vortex charge on A (cut at angle + π):"), row, 0)
+        self.le_charge_a = QLineEdit("0")
+        grid.addWidget(self.le_charge_a, row, 1)
+        row += 1
+
+        grid.addWidget(QLabel("Vortex charge on B (cut at angle + π):"), row, 0)
+        self.le_charge_b = QLineEdit("0")
+        grid.addWidget(self.le_charge_b, row, 1)
         row += 1
 
         grid.addWidget(QLabel("Pixels per patch M:"), row, 0)
@@ -886,14 +924,16 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         grid.addWidget(self.cb_dump_x, row, 0, 1, 2)
         row += 1
 
-    def phase(self):
+    def phase(self, rotation_deg=0.0):
         try:
             wl = float(self.le_wl.text()) * 1e-9
             f = float(self.le_f.text())
             d_s = float(self.le_sep.text()) * 1e-6
             dphi = float(self.le_dphi_pi.text()) * np.pi
+            charge_a = float(Fraction(self.le_charge_a.text().strip()))
+            charge_b = float(Fraction(self.le_charge_b.text().strip()))
             M = int(float(self.le_M.text()))
-            angle_deg = float(self.le_angle.text())
+            angle_deg = float(self.le_angle.text()) + rotation_deg
             alpha = float(self.le_alpha.text())
             beta_a = float(self.le_beta_a.text())
             beta_b = float(self.le_beta_b.text())
@@ -925,6 +965,10 @@ class TypeTwoFociStochastic(BaseTypeWidget):
 
         phi_A = k_t * U if tilt_a else 0.0
         phi_B = (-k_t * U if tilt_b else 0.0) + dphi
+        if charge_a or charge_b:
+            theta = _azimuth(X, Y, ang)  # vortex about the beam axis, rotates with the foci
+            phi_A = phi_A + charge_a * theta
+            phi_B = phi_B + charge_b * theta
 
         # dump axis: U (rotated 90° w.r.t. default) if checked, else V
         W = U if self.cb_dump_x.isChecked() else V
@@ -962,6 +1006,8 @@ class TypeTwoFociStochastic(BaseTypeWidget):
             "f_m": self.le_f.text(),
             "d_s_um": self.le_sep.text(),
             "dphi_pi": self.le_dphi_pi.text(),
+            "charge_a": self.le_charge_a.text(),
+            "charge_b": self.le_charge_b.text(),
             "M": self.le_M.text(),
             "angle_deg": self.le_angle.text(),
             "alpha": self.le_alpha.text(),
@@ -980,6 +1026,8 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.le_f.setText(s.get("f_m", "0.2"))
         self.le_sep.setText(s.get("d_s_um", "110"))
         self.le_dphi_pi.setText(s.get("dphi_pi", "0.0"))
+        self.le_charge_a.setText(s.get("charge_a", "0"))
+        self.le_charge_b.setText(s.get("charge_b", "0"))
         self.le_M.setText(s.get("M", "16"))
         self.le_angle.setText(s.get("angle_deg", "0.0"))
         self.le_alpha.setText(s.get("alpha", "0.5"))
@@ -992,161 +1040,9 @@ class TypeTwoFociStochastic(BaseTypeWidget):
         self.cb_noB.setChecked(s.get("noB", False))
         self.cb_dump_x.setChecked(s.get("dump_x", True))
 
-class TypeHypergeometric(BaseTypeWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.name = "Hypergeometric"
-
-        layout = QVBoxLayout(self)
-        group = QGroupBox("Hypergeometric (fine vortex) Settings")
-        layout.addWidget(group)
-        grid = QGridLayout(group)
-
-        row = 0
-        grid.addWidget(QLabel("Wavelength λ [nm]:"), row, 0)
-        self.le_wl = QLineEdit("1030")
-        grid.addWidget(self.le_wl, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Focal length f [m]:"), row, 0)
-        self.le_f = QLineEdit("0.2")
-        grid.addWidget(self.le_f, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Topological charge l:"), row, 0)
-        self.le_l = QLineEdit("3")
-        grid.addWidget(self.le_l, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Pupil radius R [mm]:"), row, 0)
-        self.le_R = QLineEdit("2.0")
-        grid.addWidget(self.le_R, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Target waist factor (x diffraction limit):"), row, 0)
-        self.le_w0_factor = QLineEdit("2.0")
-        grid.addWidget(self.le_w0_factor, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Pixels per patch M:"), row, 0)
-        self.le_M = QLineEdit("4")
-        grid.addWidget(self.le_M, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Dump shift dx [µm]:"), row, 0)
-        self.le_dump_dx = QLineEdit("0.0")
-        grid.addWidget(self.le_dump_dx, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("Dump shift dy [µm]:"), row, 0)
-        self.le_dump_dy = QLineEdit("1200.0")
-        grid.addWidget(self.le_dump_dy, row, 1)
-        row += 1
-
-        grid.addWidget(QLabel("seed:"), row, 0)
-        self.le_seed = QLineEdit("123456")
-        grid.addWidget(self.le_seed, row, 1)
-        row += 1
-
-    def phase(self):
-        try:
-            wl = float(self.le_wl.text()) * 1e-9
-            f = float(self.le_f.text())
-            l_charge = int(float(self.le_l.text()))
-            R_pupil = float(self.le_R.text()) * 1e-3
-            w0_factor = float(self.le_w0_factor.text())
-            M = int(float(self.le_M.text()))
-            dump_dx = float(self.le_dump_dx.text()) * 1e-6
-            dump_dy = float(self.le_dump_dy.text()) * 1e-6
-            seed = float(self.le_seed.text())
-        except Exception as e:
-            print("Invalid parameter values for Hypergeometric:", e)
-            return np.zeros(slm_size)
-
-        if wl <= 0 or f == 0 or R_pupil <= 0 or w0_factor <= 0 or M < 1:
-            return np.zeros(slm_size)
-
-        Ny, Nx = slm_size
-        x = (np.arange(Nx) - Nx // 2) * pixel_size
-        y = (np.arange(Ny) - Ny // 2) * pixel_size
-        X, Y = np.meshgrid(x, y, indexing="xy")
-
-        # target: a proper LG_0^l mode at focus (amplitude vanishes smoothly at
-        # the core), waist set relative to the full-pupil diffraction limit
-        w0_diffraction_limit = wl * f / (np.pi * R_pupil)
-        w0_target = w0_factor * w0_diffraction_limit
-
-        dx_focus = wl * f / (Nx * pixel_size)
-        dy_focus = wl * f / (Ny * pixel_size)
-        x_f = (np.arange(Nx) - Nx // 2) * dx_focus
-        y_f = (np.arange(Ny) - Ny // 2) * dy_focus
-        Xf, Yf = np.meshgrid(x_f, y_f, indexing="xy")
-
-        rho_f = np.hypot(Xf, Yf)
-        phi_f = np.arctan2(Yf, Xf)
-        amp_f = (np.sqrt(2) * rho_f / w0_target) ** abs(l_charge) * np.exp(
-            -(rho_f**2) / w0_target**2
-        )
-        E_target = amp_f * np.exp(1j * l_charge * phi_f)
-
-        # required SLM field = inverse FT of the focus target = the
-        # hypergeometric-Gaussian / Kummer mode (Karimi 2007, Bekshaev 2008)
-        E_required = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(E_target), norm="ortho"))
-
-        pupil = np.hypot(X, Y) <= R_pupil
-        A_required = np.abs(E_required)
-        max_in_pupil = A_required[pupil].max() if np.any(pupil) else A_required.max()
-        if max_in_pupil <= 0:
-            return np.zeros(slm_size)
-        A_required = A_required / max_in_pupil
-        phi_required = np.angle(E_required)
-
-        k0 = 2 * np.pi / wl
-        phi_dump = (k0 / f) * (dump_dx * X + dump_dy * Y)
-
-        patch_size = M * pixel_size
-        ix = np.floor((X - X.min()) / patch_size).astype(np.int64)
-        iy = np.floor((Y - Y.min()) / patch_size).astype(np.int64)
-        pid = iy * (ix.max() + 1) + ix
-        uniq, inv = np.unique(pid, return_inverse=True)
-
-        target_frac = np.where(pupil, np.clip(A_required, 0.0, 1.0) ** 2, 0.0)
-        block_sum = np.bincount(inv.ravel(), weights=target_frac.ravel())
-        block_count = np.bincount(inv.ravel())
-        block_frac = block_sum / block_count
-
-        rng = np.random.default_rng(int(seed))
-        is_signal = (rng.random(uniq.size) < block_frac)[inv]
-
-        phase = np.where(is_signal, phi_required, phi_dump)
-        wrapped = np.mod(phase, 2 * np.pi)
-        return wrapped * (bit_depth / (2 * np.pi))
-
-    def save_(self):
-        return {
-            "wl_nm": self.le_wl.text(),
-            "f_m": self.le_f.text(),
-            "l": self.le_l.text(),
-            "R_mm": self.le_R.text(),
-            "w0_factor": self.le_w0_factor.text(),
-            "M": self.le_M.text(),
-            "dump_dx_um": self.le_dump_dx.text(),
-            "dump_dy_um": self.le_dump_dy.text(),
-            "seed": self.le_seed.text(),
-        }
-
-    def load_(self, s):
-        self.le_wl.setText(s.get("wl_nm", "1030"))
-        self.le_f.setText(s.get("f_m", "0.2"))
-        self.le_l.setText(s.get("l", "3"))
-        self.le_R.setText(s.get("R_mm", "2.0"))
-        self.le_w0_factor.setText(s.get("w0_factor", "2.0"))
-        self.le_M.setText(s.get("M", "4"))
-        self.le_dump_dx.setText(s.get("dump_dx_um", "0.0"))
-        self.le_dump_dy.setText(s.get("dump_dy_um", "1200.0"))
-        self.le_seed.setText(s.get("seed", "123456"))
-        
 class TypeFourFociStochastic(BaseTypeWidget):
+    rotatable = True
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.name = "FourFociStochastic"
@@ -1192,14 +1088,14 @@ class TypeFourFociStochastic(BaseTypeWidget):
         grid.addWidget(self.le_seed, row, 1)
         row += 1
 
-    def phase(self):
+    def phase(self, rotation_deg=0.0):
         try:
             wl = float(self.le_wl.text()) * 1e-9
             f = float(self.le_f.text())
             d_s = float(self.le_sep.text()) * 1e-6
             pi_spot = int(float(self.le_pi_spot.text()))
             M = int(float(self.le_M.text()))
-            angle_deg = float(self.le_angle.text())
+            angle_deg = float(self.le_angle.text()) + rotation_deg
             seed = float(self.le_seed.text())
         except Exception as e:
             print("Invalid parameter values for FourFociStochastic:", e)
@@ -1261,6 +1157,87 @@ class TypeFourFociStochastic(BaseTypeWidget):
         self.le_angle.setText(s.get("angle_deg", "0.0"))
         self.le_seed.setText(s.get("seed", "123456"))
 
+class TypeFractionalVortexArrizon(BaseTypeWidget):
+    """Fractional vortex ring in the focus, Arrizon checkerboard encoding (see arrizon.py)."""
+
+    rotatable = True
+
+    # (attribute, label, save key, default)
+    _fields = [
+        ("le_wl", "Wavelength λ [nm]:", "wl_nm", "1030"),
+        ("le_f", "Focal length f [m]:", "f_m", "0.2"),
+        ("le_w", "Beam radius on SLM, 1/e² [mm]:", "beam_radius_mm", "3.0"),
+        ("le_charge", "Charge α (e.g. 1/19 or 0.0526):", "charge", "1/19"),
+        ("le_r0", "Ring radius r0 [µm]:", "ring_radius_um", "30"),
+        ("le_rw", "Ring width w [µm]:", "ring_width_um", "20"),
+        ("le_angle", "Angle of the cut [deg]:", "angle_deg", "0.0"),
+        ("le_clip", "Clip percentile (0-100]:", "clip", "97"),
+        ("le_patch", "Checkerboard patch [px]:", "patch", "1"),
+        ("le_cx", "Beam centre offset x [px]:", "center_x_px", "0"),
+        ("le_cy", "Beam centre offset y [px]:", "center_y_px", "0"),
+        ("le_fpix", "Focal pixel [µm]:", "focal_pixel_um", "1.0"),
+        ("le_fnpix", "Focal window points:", "focal_npix", "251"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.name = "FractionalVortexArrizon"
+        self._cache_key = None
+        self._cache = None
+
+        layout = QVBoxLayout(self)
+        group = QGroupBox("Fractional vortex (Arrizon) Settings")
+        layout.addWidget(group)
+        grid = QGridLayout(group)
+        for row, (attr, label, _, default) in enumerate(self._fields):
+            grid.addWidget(QLabel(label), row, 0)
+            le = QLineEdit(default)
+            setattr(self, attr, le)
+            grid.addWidget(le, row, 1)
+
+    def phase(self, rotation_deg=0.0):
+        try:
+            wl = float(self.le_wl.text()) * 1e-9
+            f = float(self.le_f.text())
+            w = float(self.le_w.text()) * 1e-3
+            charge = float(Fraction(self.le_charge.text().strip()))
+            r0 = float(self.le_r0.text()) * 1e-6
+            rw = float(self.le_rw.text()) * 1e-6
+            angle_deg = float(self.le_angle.text()) + rotation_deg
+            clip = float(self.le_clip.text())
+            patch = int(float(self.le_patch.text()))
+            cx = float(self.le_cx.text())
+            cy = float(self.le_cy.text())
+            fpix = float(self.le_fpix.text()) * 1e-6
+            fnpix = int(float(self.le_fnpix.text()))
+        except Exception as e:
+            print("Invalid parameter values for FractionalVortexArrizon:", e)
+            return np.zeros(slm_size)
+
+        if wl <= 0 or f <= 0 or w <= 0 or rw <= 0 or r0 < 0 or fpix <= 0 or fnpix < 2:
+            return np.zeros(slm_size)
+        if not (0 < clip <= 100) or patch < 1:
+            return np.zeros(slm_size)
+
+        key = (wl, f, w, charge, r0, rw, angle_deg, clip, patch, cx, cy, fpix, fnpix)
+        if key != self._cache_key:
+            phi = fractional_vortex_arrizon(
+                slm_size, pixel_size, wl, f, w, charge, r0, rw,
+                focal_pixel=fpix, focal_npix=fnpix, clip_percentile=clip,
+                angle_deg=angle_deg, center_px=(cx, cy), patch=patch,
+            )
+            self._cache = phi * (bit_depth / (2 * np.pi))
+            self._cache_key = key
+        return self._cache.copy()
+
+    def save_(self):
+        return {key: getattr(self, attr).text() for attr, _, key, _ in self._fields}
+
+    def load_(self, s):
+        for attr, _, key, default in self._fields:
+            getattr(self, attr).setText(str(s.get(key, default)))
+
+
 def new_type(parent, typ):
     types_dict = {
         "Flat": TypeFlat,
@@ -1273,7 +1250,7 @@ def new_type(parent, typ):
         "PhaseJumps": TypePhaseJumps,
         "TwoFociStochastic": TypeTwoFociStochastic,
         "FourFociStochastic": TypeFourFociStochastic,
-        "Hypergeometric": TypeHypergeometric,
+        "FractionalVortexArrizon": TypeFractionalVortexArrizon,
     }
     if typ not in types_dict:
         raise ValueError(

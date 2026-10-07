@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from PyQt5.QtCore import QTimer, QObject, pyqtSignal, QThread
+from PyQt5.QtCore import QTimer, QObject, pyqtSignal, QThread, Qt
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -44,6 +44,9 @@ from dlab.diagnostics.ui.scans.scan_utils import (
 NUM_WAVEPLATES = int(cfg_get("waveplates.num_waveplates", 7))
 POWER_MODE_SYNC_INTERVAL_MS = 400
 SPECTRUM_MEASUREMENT_DELAY_S = 0.01
+# Virtual axis: global rotation [deg] of every rotatable phase of the red SLM
+# (SlmWindow rotation field), e.g. for XUV far-field tomography.
+SLM_ROTATION_AXIS = "slm:Rotation"
 
 
 # -----------------------------------------------------------------------------
@@ -528,37 +531,42 @@ class GridScanWorker(QObject):
     # -------------------------------------------------------------------------
 
     def _move_slm_axis(self, ax: str, pos: float) -> None:
-        """Move an SLM virtual axis."""
-        parts = ax.split(":")
-        if len(parts) != 3:
-            raise ValueError(f"Invalid SLM axis format '{ax}'. Expected slm:ClassName:FieldName")
-
-        _, class_name, field_name = parts
-
-        active_classes = REGISTRY.get("slm:red:active_classes") or []
-        widgets = REGISTRY.get("slm:red:widgets") or []
-
-        if class_name not in active_classes:
-            raise ValueError(f"SLM class '{class_name}' is not active on the red SLM.")
-
-        phase_widget = None
-        for w in widgets:
-            if getattr(w, "name_", lambda: "")() == class_name:
-                phase_widget = w
-                break
-
-        if phase_widget is None:
-            raise ValueError(f"SLM widget for '{class_name}' not found in registry.")
-
-        if not hasattr(phase_widget, field_name):
-            raise ValueError(f"Field '{field_name}' does not exist in SLM class '{class_name}'.")
-
-        widget = getattr(phase_widget, field_name)
-        widget.setText(str(pos))
-
+        """Move an SLM virtual axis (slm:ClassName:FieldName or slm:Rotation)."""
         slm_window = REGISTRY.get("slm:red:window")
         if slm_window is None:
             raise RuntimeError("SLM window not registered.")
+
+        if ax == SLM_ROTATION_AXIS:
+            slm_window.set_rotation("red", float(pos))
+            label = "rotation [deg]"
+        else:
+            parts = ax.split(":")
+            if len(parts) != 3:
+                raise ValueError(f"Invalid SLM axis format '{ax}'. Expected slm:ClassName:FieldName")
+
+            _, class_name, field_name = parts
+
+            active_classes = REGISTRY.get("slm:red:active_classes") or []
+            widgets = REGISTRY.get("slm:red:widgets") or []
+
+            if class_name not in active_classes:
+                raise ValueError(f"SLM class '{class_name}' is not active on the red SLM.")
+
+            phase_widget = None
+            for w in widgets:
+                if getattr(w, "name_", lambda: "")() == class_name:
+                    phase_widget = w
+                    break
+
+            if phase_widget is None:
+                raise ValueError(f"SLM widget for '{class_name}' not found in registry.")
+
+            if not hasattr(phase_widget, field_name):
+                raise ValueError(f"Field '{field_name}' does not exist in SLM class '{class_name}'.")
+
+            widget = getattr(phase_widget, field_name)
+            widget.setText(str(pos))
+            label = f"{class_name}:{field_name}"
 
         levels = slm_window.compose_levels()
 
@@ -568,7 +576,7 @@ class GridScanWorker(QObject):
 
         screen_num = self.axes_meta[ax].get("screen", 3)
         slm_red.publish(levels, screen_num=screen_num)
-        self._emit(f"SLM {class_name}:{field_name} = {pos}")
+        self._emit(f"SLM {label} = {pos}")
 
     def _prepare_move_targets(self, ui_combo: list[tuple[str, float]]) -> tuple[list, list]:
         """Prepare move targets and log entries for a grid point."""
@@ -986,6 +994,7 @@ class GridScanTab(QWidget):
                 self._stage_picker.addItem(k)
         for t in PhaseSettings.types:
             self._stage_picker.addItem(f"slm:{t}")
+        self._stage_picker.addItem(SLM_ROTATION_AXIS)
 
         self._cam_picker.clear()
         for prefix in (
@@ -1038,6 +1047,18 @@ class GridScanTab(QWidget):
 
     def _setup_slm_axis_row(self, r: int, ax: str) -> None:
         """Setup a row for an SLM axis."""
+        if ax == SLM_ROTATION_AXIS:
+            param = QTableWidgetItem("")
+            param.setFlags(param.flags() & ~Qt.ItemIsEditable)
+            param.setToolTip("Rotates every rotatable phase (SLM window rotation field)")
+            self._axes_tbl.setItem(r, 1, param)
+            for col, text in ((2, "0"), (3, "178"), (4, "2"), (5, "1"), (7, "")):
+                self._axes_tbl.setItem(r, col, QTableWidgetItem(text))
+            pm = QCheckBox()
+            pm.setEnabled(False)
+            self._axes_tbl.setCellWidget(r, 6, pm)
+            return
+
         parts = ax.split(":")
         if len(parts) < 2:
             QMessageBox.critical(self, "Invalid SLM axis", "SLM axis must be slm:ClassName")
@@ -1187,7 +1208,7 @@ class GridScanTab(QWidget):
                 raise ValueError(f"Invalid numeric value in axis row {r + 1}.")
 
             if ax.startswith("slm:"):
-                if param == "":
+                if param == "" and ax != SLM_ROTATION_AXIS:
                     raise ValueError(f"SLM axis {ax}: missing parameter name.")
                 vals = generate_positions(start, end, step)
                 axes.append((ax, vals))

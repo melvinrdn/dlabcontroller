@@ -160,6 +160,14 @@ class SlmWindow(QtWidgets.QMainWindow):
         setattr(self, f"_spin_{color}", spin_display)
         h_layout_display.addWidget(QtWidgets.QLabel("Display number:"))
         h_layout_display.addWidget(spin_display)
+        le_rotation = QtWidgets.QLineEdit("0")
+        le_rotation.setToolTip(
+            "Global rotation (CCW) of the shaping phases: Vortex, Binary, Two/FourFoci, "
+            "FractionalVortexArrizon. Tilt, Lens, Zernike, ... and the background stay fixed."
+        )
+        setattr(self, f"_rotation_{color}", le_rotation)
+        h_layout_display.addWidget(QtWidgets.QLabel("Rotation [deg]:"))
+        h_layout_display.addWidget(le_rotation)
         top_layout.addLayout(h_layout_display)
 
         # Status label
@@ -271,29 +279,55 @@ class SlmWindow(QtWidgets.QMainWindow):
             except Exception:
                 params[name] = {}
         REGISTRY.register("slm:red:params", params)
+        REGISTRY.register("slm:red:rotation", self._rotation("red"))
         REGISTRY.register("slm:red:last_update", datetime.datetime.now().isoformat())
 
     # -------------------------------------------------------------------------
     # Phase operations
     # -------------------------------------------------------------------------
-    def compose_levels(self):
-        """Compose phase levels from active widgets for red SLM."""
+    def _rotation(self, color: str) -> float:
+        """Global rotation [deg] of the rotatable phases (0 if the field is invalid)."""
+        text = getattr(self, f"_rotation_{color}").text()
+        try:
+            return float(text) if text.strip() else 0.0
+        except ValueError:
+            self._log_message(f"Invalid {color} rotation '{text}', using 0 deg.")
+            return 0.0
+
+    def set_rotation(self, color: str, rotation_deg: float) -> None:
+        """Set the global rotation field (grid-scan axis slm:Rotation)."""
+        getattr(self, f"_rotation_{color}").setText(f"{rotation_deg:g}")
+
+    @staticmethod
+    def _widget_levels(widget, rotation_deg: float) -> np.ndarray:
+        if getattr(widget, "rotatable", False):
+            return widget.phase(rotation_deg=rotation_deg)
+        return widget.phase()
+
+    def compose_levels(self, rotation_deg: float | None = None):
+        """Compose phase levels from active widgets for red SLM.
+
+        `rotation_deg` overrides the window's rotation field (e.g. in a rotation scan).
+        """
         slm = self._slm_red
         active = REGISTRY.get("slm:red:active_classes") or []
         widgets = REGISTRY.get("slm:red:widgets") or []
+        if rotation_deg is None:
+            rotation_deg = self._rotation("red")
 
-        composed = np.zeros(slm.slm_size, dtype=np.uint16)
+        # same arithmetic as _get_phase (per-widget int levels), so a scan publishes what Preview shows
+        composed = np.zeros(slm.slm_size, dtype=np.int64)
         for w in widgets:
             try:
                 if w.name_() not in active:
                     continue
-                lv = w.phase()
+                lv = self._widget_levels(w, rotation_deg)
             except Exception as e:
                 self._log_message(f"Skipping '{w.name_()}' in composed phase: {e}")
                 continue
-            composed = (composed + lv) % (slm.bit_depth + 1)
+            composed = composed + lv.astype(np.int64)
 
-        return composed
+        return np.mod(composed, slm.bit_depth + 1).astype(np.uint16)
 
     @staticmethod
     def _levels_to_radians(levels: np.ndarray, bit_depth: int) -> np.ndarray:
@@ -308,10 +342,11 @@ class SlmWindow(QtWidgets.QMainWindow):
         logical = np.zeros(slm.slm_size, dtype=np.int64)
         publish_types = []
         active_refs = []
+        rotation = self._rotation(color)
 
         for cb, phase_ref in zip(checkboxes, phase_refs):
             if cb.isChecked():
-                levels = phase_ref.phase()
+                levels = self._widget_levels(phase_ref, rotation)
                 logical = logical + levels.astype(np.int64)
                 publish_types.append(phase_ref.name_())
                 active_refs.append(phase_ref)
@@ -337,8 +372,9 @@ class SlmWindow(QtWidgets.QMainWindow):
         canvas.draw()
 
         bg_tag = " + bg" if (slm.background_enabled and slm.background_phase is not None) else ""
+        rot_tag = f", rotation {rotation:g} deg" if rotation else ""
         self._log_message(
-            f"Preview updated for {color} SLM. Types: {', '.join(publish_types)}{bg_tag}"
+            f"Preview updated for {color} SLM. Types: {', '.join(publish_types)}{bg_tag}{rot_tag}"
         )
         return publish_types
 
@@ -416,6 +452,7 @@ class SlmWindow(QtWidgets.QMainWindow):
             "enabled": bool(slm.background_enabled),
         }
         settings["screen_pos"] = spin.value()
+        settings["__rotation__"] = getattr(self, f"_rotation_{color}").text()
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w") as f:
@@ -442,7 +479,7 @@ class SlmWindow(QtWidgets.QMainWindow):
 
             refs_by_name = {pr.name_(): (pr, cb) for pr, cb in zip(phase_refs, checkboxes)}
             for key, phase_data in data.items():
-                if key in ("screen_pos", "__background__"):
+                if key in ("screen_pos", "__background__", "__rotation__"):
                     continue
                 if key in refs_by_name:
                     pr, cb = refs_by_name[key]
@@ -465,6 +502,7 @@ class SlmWindow(QtWidgets.QMainWindow):
 
             if "screen_pos" in data:
                 spin.setValue(data["screen_pos"])
+            getattr(self, f"_rotation_{color}").setText(str(data.get("__rotation__", "0")))
 
             self._log_message(f"{color.capitalize()} settings loaded successfully")
         except Exception as e:
@@ -528,7 +566,7 @@ class SlmWindow(QtWidgets.QMainWindow):
 
         for key in (
             "slm:red:window", "slm:red:active_classes", "slm:red:widgets",
-            "slm:red:params", "slm:red:last_update", "slm:red:controller",
+            "slm:red:params", "slm:red:rotation", "slm:red:last_update", "slm:red:controller",
         ):
             REGISTRY.unregister(key)
 
