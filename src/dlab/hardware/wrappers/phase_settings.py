@@ -507,6 +507,14 @@ class TypeVortex(BaseTypeWidget):
         self.le_angle = QLineEdit("0.0")
         grid.addWidget(self.le_angle, 3, 1)
 
+        # singularity offset from the chip centre; turns about the chip centre with the global rotation
+        grid.addWidget(QLabel("Singularity offset x [px]:"), 4, 0)
+        self.le_x0 = QLineEdit("0")
+        grid.addWidget(self.le_x0, 4, 1)
+        grid.addWidget(QLabel("Singularity offset y [px]:"), 5, 0)
+        self.le_y0 = QLineEdit("0")
+        grid.addWidget(self.le_y0, 5, 1)
+
         self.lbl_vortices = QLabel("No vortices added")
         self.lbl_vortices.setWordWrap(True)
         layout.addWidget(self.lbl_vortices)
@@ -539,13 +547,16 @@ class TypeVortex(BaseTypeWidget):
     def phase(self, rotation_deg=0.0):
         try:
             angle_deg = float(self.le_angle.text()) + rotation_deg
+            dx, dy = float(self.le_x0.text()) * pixel_size, float(self.le_y0.text()) * pixel_size
         except ValueError:
-            print("Invalid cut angle for Vortex.")
+            print("Invalid cut angle or singularity offset for Vortex.")
             return np.zeros(slm_size)
         X, Y = _chip_grid()
         rho = np.sqrt(X**2 + Y**2)
+        rot = np.deg2rad(rotation_deg)
+        x0, y0 = dx * np.cos(rot) - dy * np.sin(rot), dx * np.sin(rot) + dy * np.cos(rot)
         # for a fractional order the 2pi * order step sits at azimuth pi + angle
-        theta = _azimuth(X, Y, np.deg2rad(angle_deg))
+        theta = _azimuth(X - x0, Y - y0, np.deg2rad(angle_deg))
         phase_profile = np.zeros(slm_size)
         for radius, order in self.vortices:
             radius_scaled = radius * w_L
@@ -555,11 +566,14 @@ class TypeVortex(BaseTypeWidget):
         return (phase_profile % (2 * np.pi)) * (bit_depth / (2 * np.pi))
 
     def save_(self):
-        return {"vortices": self.vortices, "angle_deg": self.le_angle.text()}
+        return {"vortices": self.vortices, "angle_deg": self.le_angle.text(), "offset_x_px": self.le_x0.text(),
+                "offset_y_px": self.le_y0.text()}
 
     def load_(self, settings):
         self.vortices = settings.get("vortices", [])
         self.le_angle.setText(settings.get("angle_deg", "0.0"))
+        self.le_x0.setText(str(settings.get("offset_x_px", "0")))
+        self.le_y0.setText(str(settings.get("offset_y_px", "0")))
         self.update_vortex_display()
 
 
