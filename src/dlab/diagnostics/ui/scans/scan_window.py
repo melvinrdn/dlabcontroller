@@ -27,7 +27,7 @@ class ScanWindow(QMainWindow):
         from dlab.diagnostics.ui.scans.two_color_scan_tab import TwoColorScanTab
         from dlab.diagnostics.ui.scans.grating_compressor_scan_tab import GCScanTab
         from dlab.diagnostics.ui.scans.temporal_overlap_scan_tab import TOverlapTab
-        from dlab.diagnostics.ui.scans.intensity_ladder_scan_tab import IntensityLadderScanTab
+        from dlab.diagnostics.ui.scans.dipole_phase_scan_tab import DipolePhaseScanTab
 
         self._tabs = QTabWidget()
         self.setCentralWidget(self._tabs)
@@ -36,7 +36,7 @@ class ScanWindow(QMainWindow):
         self._tabs.addTab(TwoColorScanTab(log_panel=self._log), "Two-Color Scan")
         self._tabs.addTab(GCScanTab(log_panel=self._log), "Grating Compressor Scan")
         self._tabs.addTab(TOverlapTab(log_panel=self._log), "Temporal Overlap Scan")
-        self._tabs.addTab(IntensityLadderScanTab(log_panel=self._log), "Intensity Ladder Scan")
+        self._tabs.addTab(DipolePhaseScanTab(log_panel=self._log), "Dipole Phase Scan")
 
 
     # -------------------------------------------------------------------------

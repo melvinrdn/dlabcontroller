@@ -1,7 +1,7 @@
-"""Two-foci beta_a scan on a common intensity grid, stitched over a waveplate ladder.
+"""Dipole phase scan: two-foci beta_a scan on a common intensity grid, stitched over a waveplate ladder.
 
 Only beta_a is scanned. alpha is set to its starting value and beta_b is left
-as found, so focus B is the reference: constant on each rung, and scaled with
+as found (except on the A-only frames below), so focus B is the reference: constant on each rung, and scaled with
 focus A by the waveplate from one rung to the next.
 
 One beta_a scan at fixed laser energy covers A intensities
@@ -12,6 +12,10 @@ the step in beta_a grows as I_ref,k drops. Overlap is kept minimal: the next
 rung's I_ref is the grid point n_shared steps up from the bottom of the current
 window, so consecutive rungs share exactly n_shared grid points, measured on
 both on purpose to stitch the rungs together.
+
+Optionally the jet position z (one SmarAct axis) is an outer loop: the whole
+ladder is repeated at each z. Each rung can start with single-focus frames:
+B only (beta_a = 1) and A only (beta_b = 1) at a few of its A intensities.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QGroupBox,
@@ -47,7 +52,7 @@ from dlab.diagnostics.ui.scans.grid_scan_tab import (
     _wp_index_from_stage_key,
     power_to_angle,
 )
-from dlab.diagnostics.ui.scans.scan_utils import confirm_large_scan
+from dlab.diagnostics.ui.scans.scan_utils import confirm_large_scan, generate_positions
 
 
 SLM_CLASS_NAME = "TwoFociStochastic"
@@ -57,6 +62,8 @@ SLM_FIELD_BETA_B = "le_beta_b"
 
 GAUSSIAN_PEAK_POWER_FACTOR = 0.94  # P_peak = 0.94 * E / tau for a Gaussian pulse (tau = FWHM)
 INTENSITY_UNIT = 1e14  # W/cm2, unit of the intensity fields
+UM = 1e-6  # SmarAct positions are in m, the z fields in µm
+SMARACT_PREFIX = "stage:smaract:"
 REL_TOL = 1e-9
 
 # 1 mm uncoated fused silica at 1030 nm, normal incidence: n = 1.450 (Malitson),
@@ -159,22 +166,48 @@ def reference_intensity(rung: Rung, I_B_max: float, beta_b: float) -> float:
     return I_B_max * rung.wp_fraction * (1.0 - beta_b)
 
 
+def single_focus_frames(rung: Rung, n_a_only: int) -> list[tuple[str, int, float, float, float]]:
+    """(frame, grid index, I_A, beta_a, beta_b) of the single-focus frames opening a rung.
+
+    B only: A off (beta_a = 1). A only: B off (beta_b = 1) at n_a_only of the
+    rung's A intensities, evenly spread from the top to the bottom of the rung.
+    beta_b is None where it stays as set on the SLM.
+    """
+    frames = [("B_only", -1, 0.0, 1.0, None)]
+    picks = np.unique(np.linspace(0, len(rung.points) - 1, n_a_only).round().astype(int)) if n_a_only > 0 else []
+    frames += [("A_only", rung.points[i][0], rung.points[i][1], rung.points[i][2], 1.0) for i in picks]
+    return frames
+
+
 def ladder_to_points(
-    rungs: list[Rung], I_B_max: float, beta_b: float
+    rungs: list[Rung], I_B_max: float, beta_b: float, z_um: list[float] | None = None, n_a_only: int | None = None
 ) -> tuple[list[list[float]], list[dict]]:
-    """Explicit worker points [wp_fraction, beta_a] and their log extras."""
+    """Explicit worker points [wp_fraction, beta_a, beta_b] and their log extras.
+
+    With z_um (absolute, in µm), the whole ladder is repeated at each jet position and
+    every point starts with z in m: [z, wp_fraction, beta_a, beta_b]. With n_a_only,
+    each rung starts with its single-focus frames (single_focus_frames); the last
+    point of a rung is always a two-foci frame, so beta_b is left as found.
+    """
     points, extras = [], []
-    for rung in rungs:
-        I_B = reference_intensity(rung, I_B_max, beta_b)
-        for n, I_n, beta in rung.points:
-            points.append([rung.wp_fraction, beta])
-            extras.append({
-                "rung": rung.k,
-                "grid_index": n,
-                "I_ref_Wcm2": f"{rung.I_ref:.6e}",
-                "I_target_Wcm2": f"{I_n:.6e}",
-                "I_B_Wcm2": f"{I_B:.6e}",
-            })
+    for j, z in enumerate([None] if z_um is None else z_um):
+        z_point = [] if z is None else [z * UM]
+        z_extra = {} if z is None else {"z_index": j, "z_um": f"{z:.3f}"}
+        for rung in rungs:
+            I_B = reference_intensity(rung, I_B_max, beta_b)
+            frames = single_focus_frames(rung, n_a_only) if n_a_only is not None else []
+            frames += [("AB", n, I_n, beta, None) for n, I_n, beta in rung.points]
+            for frame, n, I_n, beta_a, b_off in frames:
+                points.append(z_point + [rung.wp_fraction, beta_a, beta_b if b_off is None else b_off])
+                extras.append({
+                    **z_extra,
+                    "rung": rung.k,
+                    "frame": frame,
+                    "grid_index": n,
+                    "I_ref_Wcm2": f"{rung.I_ref:.6e}",
+                    "I_target_Wcm2": f"{I_n:.6e}",
+                    "I_B_Wcm2": f"{0.0 if b_off is not None else I_B:.6e}",
+                })
     return points, extras
 
 
@@ -188,7 +221,7 @@ class LadderPlanWindow(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent, Qt.Window)
-        self.setWindowTitle("Intensity Ladder Plan")
+        self.setWindowTitle("Dipole Phase Scan Plan")
         self.resize(820, 360)
         layout = QVBoxLayout(self)
         self.figure = Figure(figsize=(8, 3.4))
@@ -203,7 +236,9 @@ class LadderPlanWindow(QWidget):
         self.ax_i.text(0.0, 0.5, msg, transform=self.ax_i.transAxes, wrap=True)
         self.canvas.draw_idle()
 
-    def update_plan(self, rungs: list[Rung], I_B_max: float, beta_b: float, t_point_s: float) -> None:
+    def update_plan(
+        self, rungs: list[Rung], I_B_max: float, beta_b: float, n_z: int, n_single: int, t_point_s: float
+    ) -> None:
         ax_i, ax_t = self.ax_i, self.ax_t
         for ax in (ax_i, ax_t):
             ax.clear()
@@ -218,36 +253,39 @@ class LadderPlanWindow(QWidget):
             I_B = reference_intensity(rung, I_B_max, beta_b) * u
             ax_i.plot(np.full_like(I_A, I_B), I_A, "o-", ms=3, lw=1, color=color, label=f"rung {rung.k}")
             i_max = max(i_max, I_B, I_A.max(initial=0.0))
-            idx = np.arange(n_done + 1, n_done + len(rung.points) + 1)
+            idx = np.arange(n_done + 1, n_done + len(rung.points) + n_single + 1)
             ax_t.plot(idx, idx * t_point_s / 60.0, ".", ms=3, color=color)
-            n_done += len(rung.points)
+            n_done += len(rung.points) + n_single
 
         ax_i.plot([0, i_max * 1.05], [0, i_max * 1.05], "k--", lw=0.8, label="I_A = I_B")
         ax_i.set_xlabel("I_B, reference (1e14 W/cm$^2$)")
         ax_i.set_ylabel("I_A, scanned (1e14 W/cm$^2$)")
-        ax_i.set_title(f"{len(rungs)} rungs, {n_done} points", fontsize=9)
+        ax_i.set_title(f"{len(rungs)} rungs, {n_done} points" + (f", × {n_z} jet positions" if n_z > 1 else ""),
+                       fontsize=9)
         ax_i.legend(fontsize=7, loc="upper left")
         ax_i.grid(alpha=0.3)
 
-        total = n_done * t_point_s
+        total = n_done * n_z * t_point_s
         h, m, sec = int(total // 3600), int(total % 3600 // 60), int(total % 60)
         ax_t.set_xlabel("Point")
         ax_t.set_ylabel("Cumulative time (min)")
-        ax_t.set_title(f"Planned minimum: {h}h {m}min {sec}s ({t_point_s:.2f} s/point)", fontsize=9)
+        ax_t.set_title(f"Planned minimum: {h}h {m}min {sec}s ({t_point_s:.2f} s/point"
+                       + (f", ladder × {n_z}" if n_z > 1 else "") + ")", fontsize=9)
         ax_t.grid(alpha=0.3)
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
 
-class IntensityLadderScanTab(GridScanTab):
+class DipolePhaseScanTab(GridScanTab):
     """beta_a scan on a common intensity grid over a waveplate ladder (focus A)."""
 
-    _log_source = "IntensityLadderScan"
+    _log_source = "DipolePhaseScan"
 
     def _init_ui(self) -> None:
         main = QVBoxLayout(self)
         main.addWidget(self._create_laser_group())
         main.addWidget(self._create_ladder_group())
+        main.addWidget(self._create_z_group())
         main.addWidget(self._create_detectors_group())
         main.addWidget(self._create_parameters_group())
         main.addLayout(self._create_controls_row())
@@ -262,10 +300,10 @@ class IntensityLadderScanTab(GridScanTab):
         btn_plan = QPushButton("Plan Plot")
         btn_plan.clicked.connect(self._show_plan_window)
         refresh_row.addWidget(btn_plan)
-        btn_go_start = QPushButton("Go to start (WP min, beta_a max)")
+        btn_go_start = QPushButton("Go to min I_A (last rung, beta_a max)")
         btn_go_start.clicked.connect(lambda: self._go_to_extreme(start=True))
         refresh_row.addWidget(btn_go_start)
-        btn_go_end = QPushButton("Go to end (WP max, beta_a min)")
+        btn_go_end = QPushButton("Go to max I_A (rung 0, beta_a min)")
         btn_go_end.clicked.connect(lambda: self._go_to_extreme(start=False))
         refresh_row.addWidget(btn_go_end)
         refresh_row.addStretch(1)
@@ -291,7 +329,7 @@ class IntensityLadderScanTab(GridScanTab):
         self._trans_le = self._line(f"{DEFAULT_TRANSMISSION}")
         self._eff_le = self._line("0.8")
         self._alpha_le = self._line("0.5")
-        self._w_focus_le = self._line("20")
+        self._w_focus_le = self._line("16")  # 13 x 19.5 µm on the IR camera, 2026-10-08
 
         fields = [
             ("Max power before chamber (W, waveplate at 1)", self._p_max_le),
@@ -324,20 +362,31 @@ class IntensityLadderScanTab(GridScanTab):
         layout = QVBoxLayout(group)
 
         row = QHBoxLayout()
-        self._i_start_le = self._line("0.5")
-        self._i_end_le = self._line("2.0")
-        self._di_le = self._line("0.05")
+        self._i_start_le = self._line("0.3")
+        self._i_end_le = self._line("max")
+        self._di_le = self._line("0.01")
         self._beta_max_le = self._line("0.35")
-        self._n_shared_le = self._line("1")
+        self._n_shared_le = self._line("3")
         for label, le in [
             ("A: I start", self._i_start_le),
-            ("I end", self._i_end_le),
+            ("I end ('max': max of focus A)", self._i_end_le),
             ("I step", self._di_le),
             ("beta_max", self._beta_max_le),
             ("Shared points", self._n_shared_le),
         ]:
             row.addWidget(QLabel(label))
             row.addWidget(le)
+        layout.addLayout(row)
+
+        row = QHBoxLayout()
+        self._single_cb = QCheckBox("Single-focus frames at the start of each rung: B only (beta_a = 1), A only (beta_b = 1) at")
+        self._single_cb.setChecked(True)
+        self._single_cb.toggled.connect(self._update_preview)
+        row.addWidget(self._single_cb)
+        self._n_a_only_le = self._line("3")
+        row.addWidget(self._n_a_only_le)
+        row.addWidget(QLabel("A intensities"))
+        row.addStretch(1)
         layout.addLayout(row)
 
         self._ladder_tbl = QTableWidget(0, 8)
@@ -350,6 +399,30 @@ class IntensityLadderScanTab(GridScanTab):
         self._ladder_label = QLabel("")
         self._ladder_label.setWordWrap(True)
         layout.addWidget(self._ladder_label)
+        return group
+
+    def _create_z_group(self) -> QGroupBox:
+        group = QGroupBox("Jet position z (SmarAct, outer loop: the whole ladder at each z)")
+        row = QHBoxLayout(group)
+        self._z_cb = QCheckBox("Scan z")
+        self._z_cb.setChecked(True)
+        self._z_cb.toggled.connect(self._update_preview)
+        row.addWidget(self._z_cb)
+        self._z_rel_cb = QCheckBox("relative to the current position")
+        self._z_rel_cb.setChecked(True)
+        self._z_rel_cb.toggled.connect(self._update_preview)
+        row.addWidget(self._z_rel_cb)
+        self._z_combo = QComboBox()
+        self._z_combo.currentIndexChanged.connect(self._update_preview)
+        row.addWidget(self._z_combo, 1)
+        self._z_start_le = self._line("-1000")  # two in-phase Gaussian foci, w0 = 16 µm, d >= 55 µm: separate and
+        self._z_end_le = self._line("1000")     # independent of dPhi up to ~1 mm from the focus
+        self._z_step_le = self._line("500")
+        for label, le in [("start (µm)", self._z_start_le), ("end (µm)", self._z_end_le), ("step (µm)", self._z_step_le)]:
+            row.addWidget(QLabel(label))
+            row.addWidget(le)
+        self._z_label = QLabel("")
+        row.addWidget(self._z_label)
         return group
 
     # -------------------------------------------------------------------------
@@ -367,6 +440,15 @@ class IntensityLadderScanTab(GridScanTab):
         if idx >= 0:
             self._wp_combo.setCurrentIndex(idx)
         self._wp_combo.blockSignals(False)
+
+        current = self._z_combo.currentText()
+        self._z_combo.blockSignals(True)
+        self._z_combo.clear()
+        self._z_combo.addItems(REGISTRY.keys(SMARACT_PREFIX))
+        idx = self._z_combo.findText(current)
+        if idx >= 0:
+            self._z_combo.setCurrentIndex(idx)
+        self._z_combo.blockSignals(False)
 
         self._cam_picker.clear()
         for prefix in (
@@ -423,9 +505,10 @@ class IntensityLadderScanTab(GridScanTab):
     def _ladder(self) -> tuple[dict, dict, list[Rung]]:
         beam = self._beam()
         try:
+            i_end = self._i_end_le.text().strip().lower()
             ladder = {
                 "I_start": float(self._i_start_le.text()) * INTENSITY_UNIT,
-                "I_end": float(self._i_end_le.text()) * INTENSITY_UNIT,
+                "I_end": beam["I_A_max"] if i_end == "max" else float(i_end) * INTENSITY_UNIT,
                 "dI": float(self._di_le.text()) * INTENSITY_UNIT,
                 "beta_max": float(self._beta_max_le.text()),
                 "n_shared": int(self._n_shared_le.text()),
@@ -434,6 +517,39 @@ class IntensityLadderScanTab(GridScanTab):
             raise ValueError("Invalid ladder value.")
         rungs = build_ladder(I_focus_max=beam["I_A_max"], **ladder)
         return beam, ladder, rungs
+
+    def _z_positions(self) -> list[float] | None:
+        """Jet positions in µm, or None when z is not scanned."""
+        if not self._z_cb.isChecked():
+            return None
+        try:
+            start, end, step = (float(le.text()) for le in (self._z_start_le, self._z_end_le, self._z_step_le))
+        except ValueError:
+            raise ValueError("Invalid z value.")
+        return generate_positions(start, end, step)
+
+    def _n_a_only(self) -> int | None:
+        """Number of A-only frames per rung, or None without single-focus frames."""
+        if not self._single_cb.isChecked():
+            return None
+        try:
+            n = int(self._n_a_only_le.text())
+        except ValueError:
+            raise ValueError("Invalid number of A-only frames.")
+        if n < 0:
+            raise ValueError("Number of A-only frames must be >= 0.")
+        return n
+
+    def _z_absolute(self, z_key: str, z_um: list[float]) -> tuple[list[float], float | None]:
+        """Absolute jet positions (µm) and the current position (µm) they are relative to, if any."""
+        if not self._z_rel_cb.isChecked():
+            return z_um, None
+        stage = REGISTRY.get(z_key)
+        pos = None if stage is None else stage.get_position()
+        if pos is None:
+            raise ValueError(f"{z_key}: current position unknown, cannot use relative z.")
+        z0 = pos / UM
+        return [z0 + z for z in z_um], z0
 
     @staticmethod
     def _slm_widget():
@@ -510,6 +626,12 @@ class IntensityLadderScanTab(GridScanTab):
         if beta_b is None:
             warnings.append("SLM not available: I_B shown for beta_b = 0")
             beta_b = 0.0
+        try:
+            n_a_only = self._n_a_only()
+        except ValueError as e:
+            self._ladder_label.setText(str(e))
+            return
+        n_single = 0 if n_a_only is None else 1 + n_a_only
         for i, rung in enumerate(rungs):
             shared = len(rung.grid_indices & rungs[i + 1].grid_indices) if i + 1 < len(rungs) else None
             betas = [b for _, _, b in rung.points]
@@ -521,7 +643,7 @@ class IntensityLadderScanTab(GridScanTab):
                 f"{rung.wp_fraction * p_max:.4g}",
                 beta_txt,
                 f"{reference_intensity(rung, beam['I_B_max'], beta_b) / INTENSITY_UNIT:.4g}",
-                str(len(rung.points)),
+                str(len(rung.points)) + (f" + {n_single}" if n_single else ""),
                 "–" if shared is None else str(shared),
             ]
             self._ladder_tbl.insertRow(i)
@@ -530,15 +652,29 @@ class IntensityLadderScanTab(GridScanTab):
             if not rung.points:
                 warnings.append(f"rung {rung.k} has no grid point")
 
-        total = sum(len(r.points) for r in rungs)
+        n_ab = sum(len(r.points) for r in rungs)
         unique = len(set().union(*(r.grid_indices for r in rungs)))
-        text = f"{len(rungs)} rungs, {total} points ({unique} distinct A intensities, {total - unique} repeats for stitching)."
+        total = n_ab + n_single * len(rungs)
+        text = f"{len(rungs)} rungs, {n_ab} two-foci points ({unique} distinct A intensities, {n_ab - unique} repeats for stitching)"
+        text += f" + {n_single * len(rungs)} single-focus frames = {total} points." if n_single else "."
+        try:
+            z_um = self._z_positions()
+            self._z_label.setText("" if z_um is None else f"{len(z_um)} positions")
+        except ValueError as e:
+            z_um = None
+            self._z_label.setText(str(e))
+        if z_um is not None:
+            text += (f"\nz: {len(z_um)} jet positions ({z_um[0]:.6g} to {z_um[-1]:.6g} µm"
+                     + (", relative to the current position" if self._z_rel_cb.isChecked() else "")
+                     + f"), {total * len(z_um)} points in total.")
+            if not self._z_combo.currentText():
+                warnings.append("no SmarAct axis for z (activate the SmarAct window, then Refresh Devices)")
         if not self._wp_calibrated():
             warnings.append(f"waveplate {self._wp_combo.currentText() or '(none)'} has no calibration")
         if warnings:
             text += "\nWarning: " + "; ".join(warnings) + "."
         self._ladder_label.setText(text)
-        self._plan = (rungs, beam["I_B_max"], beta_b)
+        self._plan = (rungs, beam["I_B_max"], beta_b, 1 if z_um is None else len(z_um), n_single)
 
     def _wp_calibrated(self) -> bool:
         wp = _wp_index_from_stage_key(self._wp_combo.currentText())
@@ -568,28 +704,49 @@ class IntensityLadderScanTab(GridScanTab):
         beta_b_note = "as set on the SLM"
         if beta_b is None:
             beta_b, beta_b_note = 0.0, "SLM not available, assumed"
+        elif beta_b >= 1.0:
+            raise ValueError("beta_b = 1 on the SLM: focus B is off (left by an aborted scan?). Set it back first.")
 
-        points, extras = ladder_to_points(rungs, beam["I_B_max"], beta_b)
+        z_um, z0 = self._z_positions(), None
+        z_key = self._z_combo.currentText().strip()
+        if z_um is not None:
+            if not z_key.startswith(SMARACT_PREFIX):
+                raise ValueError("Select the SmarAct axis for z.")
+            z_um, z0 = self._z_absolute(z_key, z_um)
+        n_a_only = self._n_a_only()
+
+        points, extras = ladder_to_points(rungs, beam["I_B_max"], beta_b, z_um, n_a_only)
         if not points:
             raise ValueError("The ladder has no points.")
 
         ax_a = f"slm:{SLM_CLASS_NAME}:{SLM_FIELD_BETA_A}"
-        axes = [(wp_key, []), (ax_a, [])]  # same order as ladder_to_points
+        ax_b = f"slm:{SLM_CLASS_NAME}:{SLM_FIELD_BETA_B}"
+        axes = [(wp_key, []), (ax_a, []), (ax_b, [])]  # same order as ladder_to_points
         axes_meta = {
             wp_key: {"pm": True, "max_value_W": beam["p_max_W"]},
             ax_a: {"param": SLM_FIELD_BETA_A, "screen": screen},
+            ax_b: {"param": SLM_FIELD_BETA_B, "screen": screen},
         }
+        if z_um is not None:
+            axes.insert(0, (z_key, []))  # outer loop, in m
+            axes_meta[z_key] = {"pm": False}
 
         notes = [
-            f"Intensity ladder scan ({SLM_CLASS_NAME}): only beta_a scanned, focus B is the reference",
+            f"Dipole phase scan, intensity ladder ({SLM_CLASS_NAME}): only beta_a scanned, focus B is the reference",
             f"  P_max={beam['p_max_W']:.6g} W | rep={beam['rep_rate_kHz']:.6g} kHz | "
             f"tau={beam['tau_fs']:.6g} fs | T={beam['transmission']:.6g} | eff={beam['efficiency']:.6g} | "
             f"alpha={beam['alpha']:.6g} | w_focus={beam['w_focus_um']:.6g} um",
             f"  I_A_max={beam['I_A_max']:.6e} | I_B_max={beam['I_B_max']:.6e} W/cm2 (waveplate at 1, beta=0)",
             f"  A: I_start={ladder['I_start']:.6e} | I_end={ladder['I_end']:.6e} | dI={ladder['dI']:.6e} W/cm2 | "
             f"beta_max={ladder['beta_max']:.6g} | shared points={ladder['n_shared']}",
-            f"  B: beta_b={beta_b:.6g} ({beta_b_note}, not changed by the scan)",
+            f"  B: beta_b={beta_b:.6g} ({beta_b_note}; 1 only on the A-only frames)",
+            "  single-focus frames: none" if n_a_only is None else
+            f"  single-focus frames at the start of each rung: B only (beta_a=1), A only (beta_b=1) at {n_a_only} A intensities",
         ]
+        if z_um is not None:
+            notes.append(f"  z: {z_key}, {len(z_um)} jet positions (um): " + ", ".join(f"{z:.6g}" for z in z_um)
+                         + ("" if z0 is None else f" (relative to {z0:.6g} um at the start)")
+                         + "; outer loop, the whole ladder at each z")
         notes += [
             f"  rung {rg.k}: I_ref={rg.I_ref:.6e} W/cm2 | wp_fraction={rg.wp_fraction:.6f} | "
             f"I_B={reference_intensity(rg, beam['I_B_max'], beta_b):.6e} W/cm2 | {len(rg.points)} points"
@@ -604,12 +761,16 @@ class IntensityLadderScanTab(GridScanTab):
             "header_notes": notes,
             "alpha": beam["alpha"],
             "rungs": rungs,
+            "z_um": z_um,
             **self._collect_common_params(),
         }
 
     def _points_summary(self, p: dict) -> str:
         rungs = p["rungs"]
-        return f"Ladder: {len(rungs)} rungs, " + ", ".join(str(len(r.points)) for r in rungs) + " points per rung"
+        text = f"Ladder: {len(rungs)} rungs, " + ", ".join(str(len(r.points)) for r in rungs) + " points per rung"
+        if p["z_um"] is not None:
+            text += f"\nz: the ladder at {len(p['z_um'])} jet positions"
+        return text
 
     # -------------------------------------------------------------------------
     # Scan control
@@ -700,4 +861,4 @@ class IntensityLadderScanTab(GridScanTab):
         self._doing_background = False
         self._last_scan_log_path = None
         self._launch(background=False, existing=None)
-        self._log_message("Intensity ladder scan started…")
+        self._log_message("Dipole phase scan started…")
