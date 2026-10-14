@@ -174,7 +174,8 @@ def single_focus_frames(rung: Rung, n_a_only: int) -> list[tuple[str, int, float
     beta_b is None where it stays as set on the SLM.
     """
     frames = [("B_only", -1, 0.0, 1.0, None)]
-    picks = np.unique(np.linspace(0, len(rung.points) - 1, n_a_only).round().astype(int)) if n_a_only > 0 else []
+    picks = (np.unique(np.linspace(0, len(rung.points) - 1, n_a_only).round().astype(int))
+             if n_a_only > 0 and rung.points else [])
     frames += [("A_only", rung.points[i][0], rung.points[i][1], rung.points[i][2], 1.0) for i in picks]
     return frames
 
@@ -760,6 +761,7 @@ class DipolePhaseScanTab(GridScanTab):
             "point_extras": extras,
             "header_notes": notes,
             "alpha": beam["alpha"],
+            "wp_key": wp_key,
             "rungs": rungs,
             "z_um": z_um,
             **self._collect_common_params(),
@@ -854,7 +856,7 @@ class DipolePhaseScanTab(GridScanTab):
             QMessageBox.critical(self, "SLM", str(e))
             return
 
-        wp_key = p["axes"][0][0]
+        wp_key = p["wp_key"]  # not axes[0]: the z axis goes first when scanned
         REGISTRY.register(_reg_key_maxvalue(_wp_index_from_stage_key(wp_key)), float(p["axes_meta"][wp_key]["max_value_W"]))
 
         self._cached_params = p
