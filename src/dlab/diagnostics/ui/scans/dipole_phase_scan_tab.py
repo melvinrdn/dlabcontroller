@@ -458,20 +458,6 @@ class DipolePhaseScanTab(GridScanTab):
         except (AttributeError, ValueError):
             return None
 
-    def _slm_settings(self) -> str:
-        """All fields and checkboxes of the TwoFociStochastic widget, for the log header."""
-        w = self._slm_widget()
-        if w is None:
-            return "not available"
-        vals = []
-        for name in sorted(vars(w)):
-            obj = getattr(w, name)
-            if name.startswith("le_") and isinstance(obj, QLineEdit):
-                vals.append(f"{name[3:]}={obj.text()}")
-            elif name.startswith("cb_") and isinstance(obj, QCheckBox):
-                vals.append(f"{name[3:]}={obj.isChecked()}")
-        return ", ".join(vals)
-
     @staticmethod
     def _andor_preprocess() -> dict | None:
         """Rotation and crop of the Andor live window display (its saved ROI), or None if it is not open."""
@@ -591,7 +577,6 @@ class DipolePhaseScanTab(GridScanTab):
             "  single-focus frames: none" if n_a_only is None else
             f"  single-focus blocks at the start, middle and end of each z: A only (beta_b=1) at {n_a_only} A intensities, "
             "then B only (beta_a=1)",
-            f"  SLM {SLM_CLASS_NAME}: {self._slm_settings()}",
         ]
         if pre is not None:
             notes.append("  check ROI (Andor display): " + ", ".join(f"{k}={v}" for k, v in pre.items()))

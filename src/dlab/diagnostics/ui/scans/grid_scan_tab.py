@@ -145,6 +145,34 @@ def _detector_time_estimate_s(det_key: str, params: tuple) -> float:
 # -----------------------------------------------------------------------------
 
 
+def _slm_state_notes() -> list[str]:
+    """Red SLM as last composed (Preview/Publish), for the log header.
+
+    Status, time of the last composition, global rotation, background, and the
+    parameters of each active pattern. A pattern whose fields were edited since
+    is flagged: the SLM shows them only after the next publish (or the first
+    move of an SLM axis of the scan).
+    """
+    win = REGISTRY.get("slm:red:window")
+    if win is None:
+        return ["SLM red: window not open"]
+    slm = getattr(win, "_slm_red", None)
+    bg_on = slm is not None and slm.background_enabled and slm.background_phase is not None
+    notes = [
+        f"SLM red: {getattr(win, '_slm_red_status', 'unknown')} | last composed {REGISTRY.get('slm:red:last_update') or 'never'} | "
+        f"rotation={REGISTRY.get('slm:red:rotation')} deg | background " + (f"on ({slm.background_path})" if bg_on else "off")
+    ]
+    current = {w.name_(): w for w in REGISTRY.get("slm:red:widgets") or []}
+    for name, params in (REGISTRY.get("slm:red:params") or {}).items():
+        try:
+            edited = name in current and current[name].save_() != params
+        except Exception:
+            edited = False
+        notes.append(f"  {name}: " + ", ".join(f"{k}={v}" for k, v in params.items())
+                     + (" (fields edited since, not displayed yet)" if edited else ""))
+    return notes
+
+
 class GridScanWorker(QObject):
     """Worker for multi-axis grid scan.
 
@@ -1400,7 +1428,7 @@ class GridScanTab(QWidget):
             single_shot=single_shot,
             points=p.get("points"),
             point_extras=p.get("point_extras"),
-            header_notes=p.get("header_notes"),
+            header_notes=list(p.get("header_notes") or []) + _slm_state_notes(),
             frame_check=p.get("frame_check"),
         )
 
