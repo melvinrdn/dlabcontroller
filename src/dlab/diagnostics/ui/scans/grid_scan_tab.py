@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -156,6 +157,8 @@ class GridScanWorker(QObject):
     ``point_extras`` optionally gives one dict per point whose values are
     appended as extra log columns (keys of the first dict name the columns).
     ``header_notes`` are extra lines written as comments in the log header.
+    ``frame_check(point_index, det_key, frame)`` is called on every camera frame
+    of the scan (not on backgrounds); a returned string is written to the log panel.
     """
 
     progress = pyqtSignal(int, int)
@@ -177,6 +180,7 @@ class GridScanWorker(QObject):
         points: list[list[float]] | None = None,
         point_extras: list[dict] | None = None,
         header_notes: list[str] | None = None,
+        frame_check: Callable[[int | None, str, np.ndarray], str | None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -195,6 +199,8 @@ class GridScanWorker(QObject):
         self.point_extras = point_extras
         self.extra_columns = list(point_extras[0].keys()) if point_extras else []
         self.header_notes = list(header_notes or [])
+        self.frame_check = frame_check
+        self._last_frame: np.ndarray | None = None
         self.axes = axes
         self.camera_params = camera_params
         self.settle_s = float(settle_s)
@@ -459,6 +465,7 @@ class GridScanWorker(QObject):
                 background=self.background,
             )
 
+        self._last_frame = frame
         exp_meta = int((meta or {}).get("Exposure_us", exposure_or_int))
         tag = "Background" if self.background else "Image"
         data_fn = self._save_image(det_key, dev, frame, exp_meta, tag, is_8bit=is_daheng, meta=meta)
@@ -747,6 +754,7 @@ class GridScanWorker(QObject):
                         return
 
                     params = self.camera_params.get(det_key, (0, 1))
+                    self._last_frame = None
 
                     try:
                         if hasattr(dev, "grab_frame_for_scan"):
@@ -780,6 +788,13 @@ class GridScanWorker(QObject):
                         pos_log = self._format_position_log(log_combo)
                         avg = int(params[1] if len(params) >= 2 else 1)
                         self._emit(f"Saved {data_fn} @ {pos_log} on {det_key} ({saved_label}, avg {avg})")
+                        if self.frame_check is not None and self._last_frame is not None and not self.background:
+                            try:
+                                msg = self.frame_check(point_idx, det_key, self._last_frame)
+                            except Exception as e:
+                                msg = f"Frame check failed: {e}"
+                            if msg:
+                                self._emit(msg)
 
                     except Exception as e:
                         pos_log = self._format_position_log(log_combo)
@@ -1386,6 +1401,7 @@ class GridScanTab(QWidget):
             points=p.get("points"),
             point_extras=p.get("point_extras"),
             header_notes=p.get("header_notes"),
+            frame_check=p.get("frame_check"),
         )
 
         self._worker.moveToThread(self._thread)

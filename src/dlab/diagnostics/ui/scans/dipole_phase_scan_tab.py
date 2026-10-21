@@ -1,31 +1,22 @@
-"""Dipole phase scan: two-foci beta_a scan on a common intensity grid, stitched over a waveplate ladder.
+"""Dipole phase scan: two-foci beta_a scan at fixed waveplate, focus B the reference.
 
 Only beta_a is scanned. alpha is set to its starting value and beta_b is left
-as found (except on the A-only frames below), so focus B is the reference: constant on each rung, and scaled with
-focus A by the waveplate from one rung to the next.
+as found (except on the A-only frames below), so focus B is the reference,
+constant over the scan.
 
-One beta_a scan at fixed laser energy covers A intensities
-I = (1 - beta_a) * I_ref, i.e. [1 - beta_max, 1] * I_ref. A ladder of reference
-intensities I_ref,k (set with the waveplate) covers [I_start, I_end]. Every rung
-samples the same grid I_n = I_start + n * dI, so beta_a = 1 - I_n / I_ref,k and
-the step in beta_a grows as I_ref,k drops. Overlap is kept minimal: the next
-rung's I_ref is the grid point n_shared steps up from the bottom of the current
-window, so consecutive rungs share exactly n_shared grid points, measured on
-both on purpose to stitch the rungs together.
+The waveplate sets focus A to I_end at beta_a = 0, and beta_a = 1 - I_n / I_end
+scans A down the grid I_n = I_start + n * dI, from high to low intensity.
 
-Optionally the jet position z (one SmarAct axis) is an outer loop: the whole
-ladder is repeated at each z. Each rung can start with single-focus frames:
-B only (beta_a = 1) and A only (beta_b = 1) at a few of its A intensities.
+Optionally the jet position z (one SmarAct axis, absolute positions) is an outer
+loop: the whole scan is repeated at each z. Each z can hold single-focus blocks
+at its start, middle and end: A only (beta_b = 1) at a few A intensities, then
+B only (beta_a = 1). They give the drift of each focus during the scan, and the
+tab writes the signal of each one, relative to the first, to the log panel.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import numpy as np
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from matplotlib.figure import Figure
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,18 +27,15 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
-    QWidget,
-    QAbstractItemView,
 )
+from scipy.ndimage import median_filter
+from scipy.ndimage import rotate as sp_rotate
 
 from dlab.core.device_registry import REGISTRY
 from dlab.diagnostics.ui.scans.grid_scan_tab import (
     GridScanTab,
     _reg_key_calib,
-    _detector_time_estimate_s,
     _reg_key_maxvalue,
     _wp_index_from_stage_key,
     power_to_angle,
@@ -59,12 +47,15 @@ SLM_CLASS_NAME = "TwoFociStochastic"
 SLM_FIELD_BETA_A = "le_beta_a"
 SLM_FIELD_ALPHA = "le_alpha"
 SLM_FIELD_BETA_B = "le_beta_b"
+ANDOR_KEY = "camera:andor:andorcam_1"
 
 GAUSSIAN_PEAK_POWER_FACTOR = 0.94  # P_peak = 0.94 * E / tau for a Gaussian pulse (tau = FWHM)
 INTENSITY_UNIT = 1e14  # W/cm2, unit of the intensity fields
 UM = 1e-6  # SmarAct positions are in m, the z fields in µm
 SMARACT_PREFIX = "stage:smaract:"
 REL_TOL = 1e-9
+BLOCKS = ("start", "mid", "end")  # single-focus blocks of each z
+LINE_FLOOR_PX = 25  # running-median window along the dispersion for the line check (lines are ~5 px wide)
 
 # 1 mm uncoated fused silica at 1030 nm, normal incidence: n = 1.450 (Malitson),
 # R = ((n-1)/(n+1))^2 = 3.37 % per surface, T = (1-R)^2. Internal reflections
@@ -97,119 +88,105 @@ def focus_peak_intensity(
     return 2.0 * p_peak_focus / (np.pi * w_cm**2)
 
 
-@dataclass
-class Rung:
-    k: int
-    I_ref: float  # W/cm2, intensity at beta_a = 0 on this rung
-    wp_fraction: float  # waveplate power fraction giving I_ref
-    points: list[tuple[int, float, float]] = field(default_factory=list)  # (grid index n, I_n, beta_a)
-
-    @property
-    def grid_indices(self) -> set[int]:
-        return {n for n, _, _ in self.points}
-
-
-def build_ladder(
-    I_start: float, I_end: float, dI: float, beta_max: float, n_shared: int, I_focus_max: float
-) -> list[Rung]:
-    """Rungs from I_end downwards until a window reaches I_start.
-
-    Consecutive rungs share exactly n_shared grid points. Within a rung, points
-    go from high to low intensity (beta_a increasing).
-    """
+def a_grid(I_start: float, I_end: float, dI: float, I_focus_max: float) -> list[tuple[int, float, float]]:
+    """(grid index n, I_n, beta_a) of focus A, from high to low intensity; beta_a = 0 at I_end."""
     if not (0.0 < I_start < I_end):
         raise ValueError("Need 0 < I_start < I_end.")
     if dI <= 0:
         raise ValueError("Intensity step must be > 0.")
-    if not (0.0 < beta_max < 1.0):
-        raise ValueError("beta_max must be in (0, 1).")
-    if n_shared < 1:
-        raise ValueError("Shared points must be >= 1 to stitch the rungs.")
     if not I_focus_max > 0:
         raise ValueError("Max focus intensity must be > 0.")
     if I_end > I_focus_max * (1.0 + REL_TOL):
-        raise ValueError(
-            f"I_end = {I_end:.4e} W/cm2 exceeds the max focus intensity {I_focus_max:.4e} W/cm2."
-        )
-
+        raise ValueError(f"I_end = {I_end:.4e} W/cm2 exceeds the max focus intensity {I_focus_max:.4e} W/cm2.")
     n_max = int(np.floor((I_end - I_start) / dI + REL_TOL))
-    grid = [(n, I_start + n * dI) for n in range(n_max + 1)]
-    eps = REL_TOL * I_end
-
-    rungs: list[Rung] = []
-    k = 0
-    I_ref = I_end
-    while True:
-        lo = (1.0 - beta_max) * I_ref
-        rung = Rung(k=k, I_ref=I_ref, wp_fraction=min(1.0, I_ref / I_focus_max))
-        for n, I_n in reversed(grid):
-            if lo - eps <= I_n <= I_ref + eps:
-                beta = float(np.clip(1.0 - I_n / I_ref, 0.0, beta_max))
-                rung.points.append((n, I_n, beta))
-        rungs.append(rung)
-        if lo <= I_start + eps:
-            break
-        if len(rung.points) <= n_shared:
-            raise ValueError(
-                f"Rung {k} window holds only {len(rung.points)} grid point(s), not more than the "
-                f"{n_shared} shared; the ladder cannot move down. Decrease the intensity step."
-            )
-        I_ref = rung.points[-n_shared][1]
-        k += 1
-        if k > 1000:
-            raise ValueError("Ladder has more than 1000 rungs; check the step and beta_max.")
-    return rungs
+    return [(n, I_start + n * dI, max(0.0, 1.0 - (I_start + n * dI) / I_end)) for n in range(n_max, -1, -1)]
 
 
-def reference_intensity(rung: Rung, I_B_max: float, beta_b: float) -> float:
-    """Focus B intensity on a rung: constant while beta_a is scanned."""
-    return I_B_max * rung.wp_fraction * (1.0 - beta_b)
+def single_focus_block(grid: list[tuple[int, float, float]], n_a_only: int) -> list[tuple[str, int, float, float, float | None]]:
+    """(frame, grid index, I_A, beta_a, beta_b) of one single-focus block.
 
-
-def single_focus_frames(rung: Rung, n_a_only: int) -> list[tuple[str, int, float, float, float]]:
-    """(frame, grid index, I_A, beta_a, beta_b) of the single-focus frames opening a rung.
-
-    B only: A off (beta_a = 1). A only: B off (beta_b = 1) at n_a_only of the
-    rung's A intensities, evenly spread from the top to the bottom of the rung.
-    beta_b is None where it stays as set on the SLM.
+    A only (beta_b = 1) at n_a_only of the A intensities, evenly spread from the
+    top to the bottom of the grid, then B only (beta_a = 1), so beta_b is back
+    to its value at the end of the block. beta_b is None where it stays as set
+    on the SLM.
     """
-    frames = [("B_only", -1, 0.0, 1.0, None)]
-    picks = (np.unique(np.linspace(0, len(rung.points) - 1, n_a_only).round().astype(int))
-             if n_a_only > 0 and rung.points else [])
-    frames += [("A_only", rung.points[i][0], rung.points[i][1], rung.points[i][2], 1.0) for i in picks]
-    return frames
+    picks = np.unique(np.linspace(0, len(grid) - 1, n_a_only).round().astype(int)) if n_a_only > 0 and grid else []
+    frames = [("A_only", grid[i][0], grid[i][1], grid[i][2], 1.0) for i in picks]
+    return frames + [("B_only", -1, 0.0, 1.0, None)]
 
 
-def ladder_to_points(
-    rungs: list[Rung], I_B_max: float, beta_b: float, z_um: list[float] | None = None, n_a_only: int | None = None
+def scan_points(
+    grid: list[tuple[int, float, float]], wp_fraction: float, I_ref: float, I_B: float, beta_b: float,
+    z_um: list[float] | None = None, n_a_only: int | None = None,
 ) -> tuple[list[list[float]], list[dict]]:
     """Explicit worker points [wp_fraction, beta_a, beta_b] and their log extras.
 
-    With z_um (absolute, in µm), the whole ladder is repeated at each jet position and
-    every point starts with z in m: [z, wp_fraction, beta_a, beta_b]. With n_a_only,
-    each rung starts with its single-focus frames (single_focus_frames); the last
-    point of a rung is always a two-foci frame, so beta_b is left as found.
+    With z_um (absolute, in µm), the scan is repeated at each jet position and
+    every point starts with z in m: [z, wp_fraction, beta_a, beta_b]. With
+    n_a_only, each z holds a single-focus block at its start, in the middle of
+    the two-foci frames and at its end.
     """
+    half = len(grid) // 2
+    ab = [("AB", n, I_n, beta, None) for n, I_n, beta in grid]
     points, extras = [], []
     for j, z in enumerate([None] if z_um is None else z_um):
         z_point = [] if z is None else [z * UM]
         z_extra = {} if z is None else {"z_index": j, "z_um": f"{z:.3f}"}
-        for rung in rungs:
-            I_B = reference_intensity(rung, I_B_max, beta_b)
-            frames = single_focus_frames(rung, n_a_only) if n_a_only is not None else []
-            frames += [("AB", n, I_n, beta, None) for n, I_n, beta in rung.points]
-            for frame, n, I_n, beta_a, b_off in frames:
-                points.append(z_point + [rung.wp_fraction, beta_a, beta_b if b_off is None else b_off])
-                extras.append({
-                    **z_extra,
-                    "rung": rung.k,
-                    "frame": frame,
-                    "grid_index": n,
-                    "I_ref_Wcm2": f"{rung.I_ref:.6e}",
-                    "I_target_Wcm2": f"{I_n:.6e}",
-                    "I_B_Wcm2": f"{0.0 if b_off is not None else I_B:.6e}",
-                })
+        if n_a_only is None:
+            seq = [(f, "") for f in ab]
+        else:
+            block = single_focus_block(grid, n_a_only)
+            seq = ([(f, "start") for f in block] + [(f, "") for f in ab[:half]] + [(f, "mid") for f in block]
+                   + [(f, "") for f in ab[half:]] + [(f, "end") for f in block])
+        for (frame, n, I_n, beta_a, b_off), blk in seq:
+            points.append(z_point + [wp_fraction, beta_a, beta_b if b_off is None else b_off])
+            extras.append({
+                **z_extra,
+                "frame": frame,
+                "block": blk,
+                "grid_index": n,
+                "I_ref_Wcm2": f"{I_ref:.6e}",
+                "I_target_Wcm2": f"{I_n:.6e}",
+                "I_B_Wcm2": f"{0.0 if b_off is not None else I_B:.6e}",
+            })
     return points, extras
+
+
+def roi_signal(frame: np.ndarray, pre: dict) -> float:
+    """Counts of the harmonic lines in the Andor display ROI (rotation + crop of the live window).
+
+    The lines are narrow along the dispersion (x of the display); a running
+    median along x, wider than a line, is the floor (camera offset, MCP
+    background, broad glow). Static narrow features, such as the edges of the
+    MCP ring, are counted too: keep the crop on the lines.
+    """
+    img = np.asarray(frame, dtype=float)
+    if pre["enabled"]:
+        if abs(pre["angle"]) > 1e-9:
+            img = sp_rotate(img, pre["angle"], reshape=True, order=3, mode="nearest")
+        img = img[pre["y0"]:pre["y1"], pre["x0"]:pre["x1"]]
+    return float((img - median_filter(img, size=(1, LINE_FLOOR_PX))).sum())
+
+
+def make_frame_check(extras: list[dict], pre: dict, det_key: str):
+    """Frame check for the worker: signal of each single-focus frame relative to the first of its kind."""
+    first: dict[tuple, float] = {}
+
+    def check(point_idx: int | None, key: str, frame: np.ndarray) -> str | None:
+        if point_idx is None or key != det_key:
+            return None
+        e = extras[point_idx]
+        if e["frame"] == "AB":
+            return None
+        s = roi_signal(frame, pre)
+        kind = (e["frame"], e["grid_index"])
+        ref = first.setdefault(kind, s)
+        what = "B only" if e["frame"] == "B_only" else f"A only {float(e['I_target_Wcm2']) / INTENSITY_UNIT:.3g}"
+        where = (f"z = {e['z_um']} µm, " if "z_um" in e else "") + e["block"]
+        ratio = f"{s / ref:.2f} × first" if ref > 0 else "first has no signal"
+        return f"Check {where}: {what}: {s:.3g} counts, {ratio}"
+
+    return check
 
 
 # -----------------------------------------------------------------------------
@@ -217,94 +194,29 @@ def ladder_to_points(
 # -----------------------------------------------------------------------------
 
 
-class LadderPlanWindow(QWidget):
-    """Planned ladder (I_A vs I_B per rung) and planned cumulative time."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent, Qt.Window)
-        self.setWindowTitle("Dipole Phase Scan Plan")
-        self.resize(820, 360)
-        layout = QVBoxLayout(self)
-        self.figure = Figure(figsize=(8, 3.4))
-        self.canvas = FigureCanvasQTAgg(self.figure)
-        self.ax_i, self.ax_t = self.figure.subplots(1, 2)
-        layout.addWidget(self.canvas)
-
-    def show_message(self, msg: str) -> None:
-        for ax in (self.ax_i, self.ax_t):
-            ax.clear()
-            ax.set_axis_off()
-        self.ax_i.text(0.0, 0.5, msg, transform=self.ax_i.transAxes, wrap=True)
-        self.canvas.draw_idle()
-
-    def update_plan(
-        self, rungs: list[Rung], I_B_max: float, beta_b: float, n_z: int, n_single: int, t_point_s: float
-    ) -> None:
-        ax_i, ax_t = self.ax_i, self.ax_t
-        for ax in (ax_i, ax_t):
-            ax.clear()
-            ax.set_axis_on()
-        u = 1.0 / INTENSITY_UNIT
-
-        n_done = 0
-        i_max = 0.0
-        for rung in rungs:
-            color = f"C{rung.k % 10}"
-            I_A = np.array([I for _, I, _ in rung.points]) * u
-            I_B = reference_intensity(rung, I_B_max, beta_b) * u
-            ax_i.plot(np.full_like(I_A, I_B), I_A, "o-", ms=3, lw=1, color=color, label=f"rung {rung.k}")
-            i_max = max(i_max, I_B, I_A.max(initial=0.0))
-            idx = np.arange(n_done + 1, n_done + len(rung.points) + n_single + 1)
-            ax_t.plot(idx, idx * t_point_s / 60.0, ".", ms=3, color=color)
-            n_done += len(rung.points) + n_single
-
-        ax_i.plot([0, i_max * 1.05], [0, i_max * 1.05], "k--", lw=0.8, label="I_A = I_B")
-        ax_i.set_xlabel("I_B, reference (1e14 W/cm$^2$)")
-        ax_i.set_ylabel("I_A, scanned (1e14 W/cm$^2$)")
-        ax_i.set_title(f"{len(rungs)} rungs, {n_done} points" + (f", × {n_z} jet positions" if n_z > 1 else ""),
-                       fontsize=9)
-        ax_i.legend(fontsize=7, loc="upper left")
-        ax_i.grid(alpha=0.3)
-
-        total = n_done * n_z * t_point_s
-        h, m, sec = int(total // 3600), int(total % 3600 // 60), int(total % 60)
-        ax_t.set_xlabel("Point")
-        ax_t.set_ylabel("Cumulative time (min)")
-        ax_t.set_title(f"Planned minimum: {h}h {m}min {sec}s ({t_point_s:.2f} s/point"
-                       + (f", ladder × {n_z}" if n_z > 1 else "") + ")", fontsize=9)
-        ax_t.grid(alpha=0.3)
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
-
-
 class DipolePhaseScanTab(GridScanTab):
-    """beta_a scan on a common intensity grid over a waveplate ladder (focus A)."""
+    """beta_a scan of focus A at fixed waveplate, at each jet position z."""
 
     _log_source = "DipolePhaseScan"
 
     def _init_ui(self) -> None:
         main = QVBoxLayout(self)
         main.addWidget(self._create_laser_group())
-        main.addWidget(self._create_ladder_group())
+        main.addWidget(self._create_intensity_group())
         main.addWidget(self._create_z_group())
         main.addWidget(self._create_detectors_group())
         main.addWidget(self._create_parameters_group())
         main.addLayout(self._create_controls_row())
 
-        self._plan_window: LadderPlanWindow | None = None
-        self._settle_sb.valueChanged.connect(self._update_preview)
         self._cam_tbl.itemChanged.connect(self._update_preview)
         self._cam_tbl.model().rowsInserted.connect(self._update_preview)
         self._cam_tbl.model().rowsRemoved.connect(self._update_preview)
 
         refresh_row = QHBoxLayout()
-        btn_plan = QPushButton("Plan Plot")
-        btn_plan.clicked.connect(self._show_plan_window)
-        refresh_row.addWidget(btn_plan)
-        btn_go_start = QPushButton("Go to min I_A (last rung, beta_a max)")
+        btn_go_start = QPushButton("Go to min I_A (beta_a max)")
         btn_go_start.clicked.connect(lambda: self._go_to_extreme(start=True))
         refresh_row.addWidget(btn_go_start)
-        btn_go_end = QPushButton("Go to max I_A (rung 0, beta_a min)")
+        btn_go_end = QPushButton("Go to max I_A (beta_a min)")
         btn_go_end.clicked.connect(lambda: self._go_to_extreme(start=False))
         refresh_row.addWidget(btn_go_end)
         refresh_row.addStretch(1)
@@ -313,6 +225,7 @@ class DipolePhaseScanTab(GridScanTab):
         refresh_row.addWidget(btn_refresh)
         main.addLayout(refresh_row)
 
+        self._ready = True
         self._update_preview()
 
     def _line(self, text: str) -> QLineEdit:
@@ -324,7 +237,7 @@ class DipolePhaseScanTab(GridScanTab):
         group = QGroupBox("Laser and focus A")
         grid = QGridLayout(group)
 
-        self._p_max_le = self._line("2.90")
+        self._p_max_le = self._line("3.5")
         self._rep_le = self._line("8")
         self._tau_le = self._line("220")
         self._trans_le = self._line(f"{DEFAULT_TRANSMISSION}")
@@ -358,67 +271,52 @@ class DipolePhaseScanTab(GridScanTab):
         grid.addWidget(self._imax_label, row + 1, 0, 1, 4)
         return group
 
-    def _create_ladder_group(self) -> QGroupBox:
-        group = QGroupBox("Intensity ladder (intensities in 1e14 W/cm²)")
+    def _create_intensity_group(self) -> QGroupBox:
+        group = QGroupBox("Focus A intensity (1e14 W/cm²): waveplate at I end, beta_a scans A down by up to beta_max")
         layout = QVBoxLayout(group)
 
         row = QHBoxLayout()
-        self._i_start_le = self._line("0.3")
-        self._i_end_le = self._line("max")
+        self._i_end_le = self._line("1.70")
         self._di_le = self._line("0.01")
         self._beta_max_le = self._line("0.35")
-        self._n_shared_le = self._line("3")
         for label, le in [
-            ("A: I start", self._i_start_le),
             ("I end ('max': max of focus A)", self._i_end_le),
             ("I step", self._di_le),
             ("beta_max", self._beta_max_le),
-            ("Shared points", self._n_shared_le),
         ]:
             row.addWidget(QLabel(label))
             row.addWidget(le)
         layout.addLayout(row)
 
         row = QHBoxLayout()
-        self._single_cb = QCheckBox("Single-focus frames at the start of each rung: B only (beta_a = 1), A only (beta_b = 1) at")
+        self._single_cb = QCheckBox("Single-focus blocks at the start, middle and end of each z: A only (beta_b = 1) at")
         self._single_cb.setChecked(True)
         self._single_cb.toggled.connect(self._update_preview)
         row.addWidget(self._single_cb)
         self._n_a_only_le = self._line("3")
         row.addWidget(self._n_a_only_le)
-        row.addWidget(QLabel("A intensities"))
+        row.addWidget(QLabel("A intensities, then B only (beta_a = 1)"))
         row.addStretch(1)
         layout.addLayout(row)
 
-        self._ladder_tbl = QTableWidget(0, 8)
-        self._ladder_tbl.setHorizontalHeaderLabels(
-            ["Rung", "I_ref", "WP fraction", "WP power (W)", "beta_a range", "I_B (ref)", "Points", "Shared with next"]
-        )
-        self._ladder_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self._ladder_tbl)
-
-        self._ladder_label = QLabel("")
-        self._ladder_label.setWordWrap(True)
-        layout.addWidget(self._ladder_label)
+        self._scan_label = QLabel("")
+        self._scan_label.setWordWrap(True)
+        layout.addWidget(self._scan_label)
         return group
 
     def _create_z_group(self) -> QGroupBox:
-        group = QGroupBox("Jet position z (SmarAct, outer loop: the whole ladder at each z)")
+        group = QGroupBox("Jet position z (SmarAct, absolute; outer loop: the whole scan at each z)")
         row = QHBoxLayout(group)
         self._z_cb = QCheckBox("Scan z")
         self._z_cb.setChecked(True)
         self._z_cb.toggled.connect(self._update_preview)
         row.addWidget(self._z_cb)
-        self._z_rel_cb = QCheckBox("relative to the current position")
-        self._z_rel_cb.setChecked(True)
-        self._z_rel_cb.toggled.connect(self._update_preview)
-        row.addWidget(self._z_rel_cb)
         self._z_combo = QComboBox()
         self._z_combo.currentIndexChanged.connect(self._update_preview)
         row.addWidget(self._z_combo, 1)
-        self._z_start_le = self._line("-1000")  # two in-phase Gaussian foci, w0 = 16 µm, d >= 55 µm: separate and
-        self._z_end_le = self._line("1000")     # independent of dPhi up to ~1 mm from the focus
-        self._z_step_le = self._line("500")
+        self._z_start_le = self._line("-250")
+        self._z_end_le = self._line("750")
+        self._z_step_le = self._line("250")
         for label, le in [("start (µm)", self._z_start_le), ("end (µm)", self._z_end_le), ("step (µm)", self._z_step_le)]:
             row.addWidget(QLabel(label))
             row.addWidget(le)
@@ -468,7 +366,7 @@ class DipolePhaseScanTab(GridScanTab):
         pass  # no axes table: the waveplate always runs in power mode here
 
     # -------------------------------------------------------------------------
-    # Ladder computation and preview
+    # Scan computation and preview
     # -------------------------------------------------------------------------
 
     def _beam(self) -> dict:
@@ -503,21 +401,25 @@ class DipolePhaseScanTab(GridScanTab):
         beam["I_B_max"] = peak(beam["alpha"])
         return beam
 
-    def _ladder(self) -> tuple[dict, dict, list[Rung]]:
+    def _scan(self) -> tuple[dict, dict, list[tuple[int, float, float]]]:
         beam = self._beam()
         try:
             i_end = self._i_end_le.text().strip().lower()
-            ladder = {
-                "I_start": float(self._i_start_le.text()) * INTENSITY_UNIT,
+            scan = {
                 "I_end": beam["I_A_max"] if i_end == "max" else float(i_end) * INTENSITY_UNIT,
                 "dI": float(self._di_le.text()) * INTENSITY_UNIT,
-                "beta_max": float(self._beta_max_le.text()),
-                "n_shared": int(self._n_shared_le.text()),
             }
+            beta_max = float(self._beta_max_le.text())
         except ValueError:
-            raise ValueError("Invalid ladder value.")
-        rungs = build_ladder(I_focus_max=beam["I_A_max"], **ladder)
-        return beam, ladder, rungs
+            raise ValueError("Invalid intensity value.")
+        if not 0.0 < beta_max < 1.0:
+            raise ValueError("beta_max must be in (0, 1).")
+        # lowest grid point (down from I_end in steps of dI) with beta_a <= beta_max
+        scan["I_start"] = scan["I_end"] - np.floor(beta_max * scan["I_end"] / scan["dI"] + REL_TOL) * scan["dI"]
+        scan["beta_max"] = beta_max
+        grid = a_grid(scan["I_start"], scan["I_end"], scan["dI"], beam["I_A_max"])
+        scan["wp_fraction"] = min(1.0, scan["I_end"] / beam["I_A_max"])
+        return beam, scan, grid
 
     def _z_positions(self) -> list[float] | None:
         """Jet positions in µm, or None when z is not scanned."""
@@ -530,7 +432,7 @@ class DipolePhaseScanTab(GridScanTab):
         return generate_positions(start, end, step)
 
     def _n_a_only(self) -> int | None:
-        """Number of A-only frames per rung, or None without single-focus frames."""
+        """Number of A-only frames per single-focus block, or None without the blocks."""
         if not self._single_cb.isChecked():
             return None
         try:
@@ -540,17 +442,6 @@ class DipolePhaseScanTab(GridScanTab):
         if n < 0:
             raise ValueError("Number of A-only frames must be >= 0.")
         return n
-
-    def _z_absolute(self, z_key: str, z_um: list[float]) -> tuple[list[float], float | None]:
-        """Absolute jet positions (µm) and the current position (µm) they are relative to, if any."""
-        if not self._z_rel_cb.isChecked():
-            return z_um, None
-        stage = REGISTRY.get(z_key)
-        pos = None if stage is None else stage.get_position()
-        if pos is None:
-            raise ValueError(f"{z_key}: current position unknown, cannot use relative z.")
-        z0 = pos / UM
-        return [z0 + z for z in z_um], z0
 
     @staticmethod
     def _slm_widget():
@@ -567,115 +458,71 @@ class DipolePhaseScanTab(GridScanTab):
         except (AttributeError, ValueError):
             return None
 
+    def _slm_settings(self) -> str:
+        """All fields and checkboxes of the TwoFociStochastic widget, for the log header."""
+        w = self._slm_widget()
+        if w is None:
+            return "not available"
+        vals = []
+        for name in sorted(vars(w)):
+            obj = getattr(w, name)
+            if name.startswith("le_") and isinstance(obj, QLineEdit):
+                vals.append(f"{name[3:]}={obj.text()}")
+            elif name.startswith("cb_") and isinstance(obj, QCheckBox):
+                vals.append(f"{name[3:]}={obj.isChecked()}")
+        return ", ".join(vals)
+
+    @staticmethod
+    def _andor_preprocess() -> dict | None:
+        """Rotation and crop of the Andor live window display (its saved ROI), or None if it is not open."""
+        w = REGISTRY.get(ANDOR_KEY)
+        try:
+            return {
+                "enabled": w._pre_enable_cb.isChecked(),
+                "angle": float(w._pre_angle_sb.value()),
+                **{k: int(getattr(w, f"_pre_{k}_sb").value()) for k in ("x0", "x1", "y0", "y1")},
+            }
+        except AttributeError:
+            return None
+
     def _update_preview(self) -> None:
-        if not hasattr(self, "_plan_window"):
+        if not getattr(self, "_ready", False):
             return  # still building the UI
-        self._plan = None
-        self._update_ladder_table()
-        self._refresh_plan_window()
-
-    def _show_plan_window(self) -> None:
-        if self._plan_window is None:
-            self._plan_window = LadderPlanWindow(self)
-        self._refresh_plan_window()
-        self._plan_window.show()
-        self._plan_window.raise_()
-
-    def _refresh_plan_window(self) -> None:
-        if self._plan_window is None:
-            return
-        if self._plan is None:
-            self._plan_window.show_message(self._ladder_label.text() or self._imax_label.text())
-        else:
-            self._plan_window.update_plan(*self._plan, self._time_per_point_s())
-
-    def _time_per_point_s(self) -> float:
-        """Settle + detector acquisition per point; lenient, for the live plan only."""
-        t = float(self._settle_sb.value())
-        for r in range(self._cam_tbl.rowCount()):
-            try:
-                key = self._cam_tbl.item(r, 0).text().strip()
-                p1 = float(self._cam_tbl.item(r, 1).text())
-                avg = int(float(self._cam_tbl.item(r, 3).text()))
-            except (AttributeError, ValueError):
-                continue
-            t += _detector_time_estimate_s(key, (p1, avg))
-        return t
-
-    def _update_ladder_table(self) -> None:
-        self._ladder_tbl.setRowCount(0)
         try:
             beam = self._beam()
             self._imax_label.setText(
                 f"Max intensity (waveplate at 1, beta = 0): "
-                f"A {beam['I_A_max'] / INTENSITY_UNIT:.4g}, B {beam['I_B_max'] / INTENSITY_UNIT:.4g} "
-                f"× 1e14 W/cm²"
+                f"A {beam['I_A_max'] / INTENSITY_UNIT:.4g}, B {beam['I_B_max'] / INTENSITY_UNIT:.4g} × 1e14 W/cm²"
             )
+            _, scan, grid = self._scan()
+            n_a_only = self._n_a_only()
+            z_um = self._z_positions()
         except ValueError as e:
-            self._imax_label.setText(str(e))
-            self._ladder_label.setText("")
-            return
-        try:
-            _, _, rungs = self._ladder()
-        except ValueError as e:
-            self._ladder_label.setText(str(e))
+            self._scan_label.setText(str(e))
             return
 
-        p_max = beam["p_max_W"]
         warnings = []
         beta_b = self._slm_beta_b()
         if beta_b is None:
             warnings.append("SLM not available: I_B shown for beta_b = 0")
             beta_b = 0.0
-        try:
-            n_a_only = self._n_a_only()
-        except ValueError as e:
-            self._ladder_label.setText(str(e))
-            return
-        n_single = 0 if n_a_only is None else 1 + n_a_only
-        for i, rung in enumerate(rungs):
-            shared = len(rung.grid_indices & rungs[i + 1].grid_indices) if i + 1 < len(rungs) else None
-            betas = [b for _, _, b in rung.points]
-            beta_txt = f"{min(betas):.4f} – {max(betas):.4f}" if betas else "–"
-            cells = [
-                str(rung.k),
-                f"{rung.I_ref / INTENSITY_UNIT:.4g}",
-                f"{rung.wp_fraction:.4f}",
-                f"{rung.wp_fraction * p_max:.4g}",
-                beta_txt,
-                f"{reference_intensity(rung, beam['I_B_max'], beta_b) / INTENSITY_UNIT:.4g}",
-                str(len(rung.points)) + (f" + {n_single}" if n_single else ""),
-                "–" if shared is None else str(shared),
-            ]
-            self._ladder_tbl.insertRow(i)
-            for c, text in enumerate(cells):
-                self._ladder_tbl.setItem(i, c, QTableWidgetItem(text))
-            if not rung.points:
-                warnings.append(f"rung {rung.k} has no grid point")
-
-        n_ab = sum(len(r.points) for r in rungs)
-        unique = len(set().union(*(r.grid_indices for r in rungs)))
-        total = n_ab + n_single * len(rungs)
-        text = f"{len(rungs)} rungs, {n_ab} two-foci points ({unique} distinct A intensities, {n_ab - unique} repeats for stitching)"
-        text += f" + {n_single * len(rungs)} single-focus frames = {total} points." if n_single else "."
-        try:
-            z_um = self._z_positions()
-            self._z_label.setText("" if z_um is None else f"{len(z_um)} positions")
-        except ValueError as e:
-            z_um = None
-            self._z_label.setText(str(e))
-        if z_um is not None:
-            text += (f"\nz: {len(z_um)} jet positions ({z_um[0]:.6g} to {z_um[-1]:.6g} µm"
-                     + (", relative to the current position" if self._z_rel_cb.isChecked() else "")
-                     + f"), {total * len(z_um)} points in total.")
-            if not self._z_combo.currentText():
-                warnings.append("no SmarAct axis for z (activate the SmarAct window, then Refresh Devices)")
+        n_single = 0 if n_a_only is None else len(BLOCKS) * len(single_focus_block(grid, n_a_only))
+        per_z = len(grid) + n_single
+        I_B = beam["I_B_max"] * scan["wp_fraction"] * (1.0 - beta_b)
+        text = (f"Waveplate {scan['wp_fraction']:.4f} ({scan['wp_fraction'] * beam['p_max_W']:.4g} W), "
+                f"beta_a {grid[0][2]:.4f} – {grid[-1][2]:.4f}, I_B {I_B / INTENSITY_UNIT:.4g}. "
+                f"{len(grid)} two-foci points" + (f" + {n_single} single-focus frames" if n_single else "")
+                + f" = {per_z} points" + ("." if z_um is None else f" per z, × {len(z_um)} z = {per_z * len(z_um)} points."))
+        self._z_label.setText("" if z_um is None else f"{len(z_um)} positions")
+        if z_um is not None and not self._z_combo.currentText():
+            warnings.append("no SmarAct axis for z (activate the SmarAct window, then Refresh Devices)")
         if not self._wp_calibrated():
             warnings.append(f"waveplate {self._wp_combo.currentText() or '(none)'} has no calibration")
+        if n_a_only is not None and self._andor_preprocess() is None:
+            warnings.append("Andor live window not open: no check of the single-focus frames")
         if warnings:
             text += "\nWarning: " + "; ".join(warnings) + "."
-        self._ladder_label.setText(text)
-        self._plan = (rungs, beam["I_B_max"], beta_b, 1 if z_um is None else len(z_um), n_single)
+        self._scan_label.setText(text)
 
     def _wp_calibrated(self) -> bool:
         wp = _wp_index_from_stage_key(self._wp_combo.currentText())
@@ -689,7 +536,7 @@ class DipolePhaseScanTab(GridScanTab):
     # -------------------------------------------------------------------------
 
     def _collect_params(self) -> dict:
-        beam, ladder, rungs = self._ladder()
+        beam, scan, grid = self._scan()
         wp_key = self._wp_combo.currentText().strip()
         wp = _wp_index_from_stage_key(wp_key)
         if wp is None:
@@ -708,21 +555,20 @@ class DipolePhaseScanTab(GridScanTab):
         elif beta_b >= 1.0:
             raise ValueError("beta_b = 1 on the SLM: focus B is off (left by an aborted scan?). Set it back first.")
 
-        z_um, z0 = self._z_positions(), None
+        z_um = self._z_positions()
         z_key = self._z_combo.currentText().strip()
-        if z_um is not None:
-            if not z_key.startswith(SMARACT_PREFIX):
-                raise ValueError("Select the SmarAct axis for z.")
-            z_um, z0 = self._z_absolute(z_key, z_um)
+        if z_um is not None and not z_key.startswith(SMARACT_PREFIX):
+            raise ValueError("Select the SmarAct axis for z.")
         n_a_only = self._n_a_only()
 
-        points, extras = ladder_to_points(rungs, beam["I_B_max"], beta_b, z_um, n_a_only)
+        I_B = beam["I_B_max"] * scan["wp_fraction"] * (1.0 - beta_b)
+        points, extras = scan_points(grid, scan["wp_fraction"], scan["I_end"], I_B, beta_b, z_um, n_a_only)
         if not points:
-            raise ValueError("The ladder has no points.")
+            raise ValueError("The scan has no points.")
 
         ax_a = f"slm:{SLM_CLASS_NAME}:{SLM_FIELD_BETA_A}"
         ax_b = f"slm:{SLM_CLASS_NAME}:{SLM_FIELD_BETA_B}"
-        axes = [(wp_key, []), (ax_a, []), (ax_b, [])]  # same order as ladder_to_points
+        axes = [(wp_key, []), (ax_a, []), (ax_b, [])]  # same order as scan_points
         axes_meta = {
             wp_key: {"pm": True, "max_value_W": beam["p_max_W"]},
             ax_a: {"param": SLM_FIELD_BETA_A, "screen": screen},
@@ -732,27 +578,26 @@ class DipolePhaseScanTab(GridScanTab):
             axes.insert(0, (z_key, []))  # outer loop, in m
             axes_meta[z_key] = {"pm": False}
 
+        pre = self._andor_preprocess() if n_a_only is not None else None
         notes = [
-            f"Dipole phase scan, intensity ladder ({SLM_CLASS_NAME}): only beta_a scanned, focus B is the reference",
+            f"Dipole phase scan ({SLM_CLASS_NAME}): only beta_a scanned, focus B is the reference",
             f"  P_max={beam['p_max_W']:.6g} W | rep={beam['rep_rate_kHz']:.6g} kHz | "
             f"tau={beam['tau_fs']:.6g} fs | T={beam['transmission']:.6g} | eff={beam['efficiency']:.6g} | "
             f"alpha={beam['alpha']:.6g} | w_focus={beam['w_focus_um']:.6g} um",
             f"  I_A_max={beam['I_A_max']:.6e} | I_B_max={beam['I_B_max']:.6e} W/cm2 (waveplate at 1, beta=0)",
-            f"  A: I_start={ladder['I_start']:.6e} | I_end={ladder['I_end']:.6e} | dI={ladder['dI']:.6e} W/cm2 | "
-            f"beta_max={ladder['beta_max']:.6g} | shared points={ladder['n_shared']}",
-            f"  B: beta_b={beta_b:.6g} ({beta_b_note}; 1 only on the A-only frames)",
+            f"  A: I_start={scan['I_start']:.6e} | I_end={scan['I_end']:.6e} (beta_a=0) | dI={scan['dI']:.6e} W/cm2 | "
+            f"beta_a {grid[0][2]:.6g} to {grid[-1][2]:.6g} (beta_max={scan['beta_max']:.6g}) | {len(grid)} points | wp_fraction={scan['wp_fraction']:.6f}",
+            f"  B: beta_b={beta_b:.6g} ({beta_b_note}; 1 only on the A-only frames) | I_B={I_B:.6e} W/cm2",
             "  single-focus frames: none" if n_a_only is None else
-            f"  single-focus frames at the start of each rung: B only (beta_a=1), A only (beta_b=1) at {n_a_only} A intensities",
+            f"  single-focus blocks at the start, middle and end of each z: A only (beta_b=1) at {n_a_only} A intensities, "
+            "then B only (beta_a=1)",
+            f"  SLM {SLM_CLASS_NAME}: {self._slm_settings()}",
         ]
+        if pre is not None:
+            notes.append("  check ROI (Andor display): " + ", ".join(f"{k}={v}" for k, v in pre.items()))
         if z_um is not None:
             notes.append(f"  z: {z_key}, {len(z_um)} jet positions (um): " + ", ".join(f"{z:.6g}" for z in z_um)
-                         + ("" if z0 is None else f" (relative to {z0:.6g} um at the start)")
-                         + "; outer loop, the whole ladder at each z")
-        notes += [
-            f"  rung {rg.k}: I_ref={rg.I_ref:.6e} W/cm2 | wp_fraction={rg.wp_fraction:.6f} | "
-            f"I_B={reference_intensity(rg, beam['I_B_max'], beta_b):.6e} W/cm2 | {len(rg.points)} points"
-            for rg in rungs
-        ]
+                         + "; outer loop, the whole scan at each z")
 
         return {
             "axes": axes,
@@ -760,18 +605,18 @@ class DipolePhaseScanTab(GridScanTab):
             "points": points,
             "point_extras": extras,
             "header_notes": notes,
+            "frame_check": None if pre is None else make_frame_check(extras, pre, ANDOR_KEY),
             "alpha": beam["alpha"],
             "wp_key": wp_key,
-            "rungs": rungs,
+            "n_grid": len(grid),
             "z_um": z_um,
             **self._collect_common_params(),
         }
 
     def _points_summary(self, p: dict) -> str:
-        rungs = p["rungs"]
-        text = f"Ladder: {len(rungs)} rungs, " + ", ".join(str(len(r.points)) for r in rungs) + " points per rung"
+        text = f"{p['n_grid']} A intensities, {len(p['points'])} points"
         if p["z_um"] is not None:
-            text += f"\nz: the ladder at {len(p['z_um'])} jet positions"
+            text += f"\nz: the scan at {len(p['z_um'])} jet positions"
         return text
 
     # -------------------------------------------------------------------------
@@ -788,21 +633,14 @@ class DipolePhaseScanTab(GridScanTab):
         getattr(w, SLM_FIELD_ALPHA).setText(f"{alpha:.6f}")
 
     def _go_to_extreme(self, start: bool) -> None:
-        """Move to the lowest (start) or highest (end) A intensity of the ladder, to check contrast.
-
-        start: last rung (lowest waveplate fraction) at its largest beta_a.
-        end: rung 0 (highest waveplate fraction) at beta_a = 0.
-        """
+        """Move to the lowest (start) or highest (end) A intensity of the scan, to check contrast."""
         if not self._start_btn.isEnabled():
             QMessageBox.warning(self, "Scan running", "Wait for the scan to finish.")
             return
         label = "start" if start else "end"
         try:
-            beam, _, rungs = self._ladder()
-            rung = rungs[-1] if start else rungs[0]
-            if not rung.points:
-                raise ValueError(f"Rung {rung.k} has no grid point.")
-            _, I_n, beta_a = rung.points[-1] if start else rung.points[0]
+            beam, scan, grid = self._scan()
+            _, I_n, beta_a = grid[-1] if start else grid[0]
 
             wp_key = self._wp_combo.currentText().strip()
             wp = _wp_index_from_stage_key(wp_key)
@@ -828,15 +666,15 @@ class DipolePhaseScanTab(GridScanTab):
             getattr(self._slm_widget(), SLM_FIELD_BETA_A).setText(f"{beta_a:.6f}")
             slm_red.publish(slm_window.compose_levels(), screen_num=screen)
 
-            angle = power_to_angle(rung.wp_fraction, float(amp_off[1]))
+            angle = power_to_angle(scan["wp_fraction"], float(amp_off[1]))
             stage.move_to(angle, blocking=False)
         except Exception as e:
             QMessageBox.critical(self, f"Go to {label}", str(e))
             return
 
         self._log_message(
-            f"Go to {label}: rung {rung.k}, WP fraction {rung.wp_fraction:.4f} "
-            f"({rung.wp_fraction * beam['p_max_W']:.4g} W, {angle:.2f} deg), beta_a {beta_a:.4f}, "
+            f"Go to {label}: WP fraction {scan['wp_fraction']:.4f} "
+            f"({scan['wp_fraction'] * beam['p_max_W']:.4g} W, {angle:.2f} deg), beta_a {beta_a:.4f}, "
             f"I_A {I_n / INTENSITY_UNIT:.4g}e14 W/cm2, alpha {beam['alpha']:.4g}"
         )
 
@@ -863,4 +701,4 @@ class DipolePhaseScanTab(GridScanTab):
         self._doing_background = False
         self._last_scan_log_path = None
         self._launch(background=False, existing=None)
-        self._log_message("Dipole phase scan started…")
+        self._log_message("Dipole phase scan started…" + ("" if p["frame_check"] else " (no single-focus check: Andor live window not open)"))
